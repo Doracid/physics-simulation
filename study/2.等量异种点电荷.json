@@ -1,0 +1,9 @@
+{
+  "name": "2. 等量异种点电荷（电偶极子）",
+  "category": "electrostatic",
+  "description": "观察等量正负电荷形成的电场分布，电场线从正电荷发出终止于负电荷。",
+  "elements": [
+    {"type": "Charge", "x": -100, "y": 0, "q": 1e-6, "radius": 30},
+    {"type": "Charge", "x": 100, "y": 0, "q": -1e-6, "radius": 30}
+  ]
+}

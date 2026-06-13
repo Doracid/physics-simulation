@@ -1,0 +1,13 @@
+{
+  "name": "5. 串联电路",
+  "category": "circuit",
+  "description": "两个电阻串联的电路。串联电路中电流处处相等，总电阻等于各电阻之和。",
+  "elements": [
+    {"type": "Power", "x": -40, "y": -80, "ptype": "V", "value": 12.0, "angle": 0, "mode": "DC", "switched_on": true},
+    {"type": "Resistor", "x": -100, "y": 70, "resistance": 10.0, "angle": 0},
+    {"type": "Resistor", "x": 20, "y": 70, "resistance": 20.0, "angle": 0},
+    {"type": "Wire", "points": [[-70, -80], [-140, -80], [-140, 70]], "current": 0, "auto_current": true},
+    {"type": "Wire", "points": [[-10, -80], [60, -80], [60, 70]], "current": 0, "auto_current": true},
+    {"type": "Wire", "points": [[-60, 70], [-20, 70]], "current": 0, "auto_current": true}
+  ]
+}

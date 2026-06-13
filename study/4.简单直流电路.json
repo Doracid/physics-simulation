@@ -1,0 +1,11 @@
+{
+  "name": "4. 简单直流电路",
+  "category": "circuit",
+  "description": "一个简单直流电路：电源与电阻组成的闭合回路。点击电源顶部的开关按钮接通电源，观察电流。",
+  "elements": [
+    {"type": "Power", "x": -40, "y": -60, "ptype": "V", "value": 12.0, "angle": 0, "mode": "DC", "switched_on": true},
+    {"type": "Resistor", "x": -40, "y": 90, "resistance": 10.0, "angle": 0},
+    {"type": "Wire", "points": [[-70, -60], [-80, 90]], "current": 0, "auto_current": true},
+    {"type": "Wire", "points": [[-10, -60], [0, 90]], "current": 0, "auto_current": true}
+  ]
+}

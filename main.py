@@ -666,6 +666,18 @@ _undo_limit = 50      # max undo steps
 _presnap_elements = None  # serialized pre-play snapshot (list of dicts)
 
 # ---------------------------------------------------------------------------
+# Study mode state
+# ---------------------------------------------------------------------------
+study_mode = False
+study_projects = []
+study_project_index = 0
+study_project_name = ""
+_study_next_rect = None       # "下一个" button rect
+_exit_to_home = False         # signal to return to home screen
+
+STUDY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'study')
+
+# ---------------------------------------------------------------------------
 # Undo / Pre-play snapshot helpers
 # ---------------------------------------------------------------------------
 
@@ -1169,6 +1181,25 @@ def draw_top_bar(surface):
     draw_round_rect(surface, undo_bg, _undo_btn_rect, 9, border_color=BORDER)
     surface.blit(undo_size, undo_size.get_rect(center=_undo_btn_rect.center))
 
+    # ── Study mode: project name + "下一个" button ─────────────────
+    global _study_next_rect
+    if study_mode:
+        # "下一个" button – between undo and fps
+        next_font = get_font(18, bold=True)
+        next_lbl = "下一个 ▶"
+        next_size = next_font.render(next_lbl, True, TEXT_COLOR)
+        nw = next_size.get_width() + 20
+        _study_next_rect = pygame.Rect(_undo_btn_rect.left - nw - 6, 5, nw, TOP_BAR_H - 10)
+        next_hover = _study_next_rect.collidepoint(pygame.mouse.get_pos())
+        next_bg = (24, 90, 120) if next_hover else (20, 60, 80)
+        draw_glow(surface, _study_next_rect, CYAN, intensity=50, spread=5, radius=9)
+        draw_round_rect(surface, next_bg, _study_next_rect, 9,
+                        border_color=CYAN_DIM if next_hover else BORDER)
+        surface.blit(next_size, next_size.get_rect(center=_study_next_rect.center))
+
+    else:
+        _study_next_rect = None
+
 
 def draw_left_toolbar(surface):
     """Draw the left-side component toolbar with category tabs."""
@@ -1259,8 +1290,54 @@ def draw_left_toolbar(surface):
         surface.blit(txt, tr_txt)
 
 
+def draw_study_title(surface):
+    """Draw the study project name centered below the top bar in the canvas area."""
+    if not study_mode or not study_project_name:
+        return
+    font = get_font(22, bold=True)
+    name_display = f"【 {study_project_name} 】"
+    name_surf = font.render(name_display, True, CYAN_GLOW)
+    # Center horizontally in the canvas area (between toolbar right edge and screen right edge)
+    canvas_center_x = TOOLBAR_W + (SCREEN_W - TOOLBAR_W) // 2
+    y = TOP_BAR_H + 8  # just below the top bar
+    # Draw with a subtle background card
+    pad_x, pad_y = 20, 6
+    card_rect = pygame.Rect(canvas_center_x - name_surf.get_width() // 2 - pad_x,
+                            y, name_surf.get_width() + pad_x * 2,
+                            name_surf.get_height() + pad_y * 2)
+    draw_round_rect(surface, (20, 18, 36, 200), card_rect, 12, border_color=CYAN_DIM)
+    # Thin glow under the card
+    draw_glow(surface, card_rect, CYAN, intensity=30, spread=4, radius=12)
+    surface.blit(name_surf, name_surf.get_rect(center=(canvas_center_x, card_rect.centery)))
+
+
 def draw_mode_hint(surface):
-    """Show a hint about the current mode."""
+    """Show a hint about the current mode or study project description."""
+    # Study mode description (shown when no tool is active)
+    if study_mode and mode == 'select':
+        font = get_font(18)
+        # Load description from current project data
+        desc = ""
+        if study_project_index < len(study_projects):
+            try:
+                with open(study_projects[study_project_index], 'r', encoding='utf-8') as _f:
+                    _data = json.load(_f)
+                desc = _data.get('description', '')
+            except Exception:
+                pass
+        if desc:
+            # Draw study description in a glass card below top bar
+            text_surf = font.render(desc, True, (180, 200, 220))
+            pad_x, pad_y = 14, 8
+            card_w = text_surf.get_width() + pad_x * 2
+            card_h = text_surf.get_height() + pad_y * 2
+            card_x = TOOLBAR_W + 16
+            card_y = TOP_BAR_H + 12
+            card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
+            draw_round_rect(surface, CARD_BG, card_rect, 10, border_color=CYAN_DIM)
+            surface.blit(text_surf, (card_x + pad_x, card_y + pad_y))
+        return
+
     if mode == 'select':
         return
     font = get_font(22)
@@ -1953,6 +2030,10 @@ def handle_mousedown(btn, pos):
 
     # === Top bar clicks ===
     if pos[1] < TOP_BAR_H:
+        # Study mode "下一个" button (renders above toolbar buttons)
+        if study_mode and _study_next_rect and _study_next_rect.collidepoint(pos):
+            handle_top_action('study_next')
+            return
         for i, btn_def in enumerate(top_buttons):
             if top_btn_rects[i].collidepoint(pos):
                 handle_top_action(btn_def['action'])
@@ -2302,9 +2383,155 @@ def handle_keydown(key):
             selected = None
 
 
+# ---------------------------------------------------------------------------
+# Study mode helpers
+# ---------------------------------------------------------------------------
+
+def load_study_project(index):
+    """Load a study project by its index in the study_projects list."""
+    global study_project_index, study_project_name, elements, current_category
+    global mode, selected, editing_element, cap_voltages, ind_currents, sim_time
+    global faraday_active, faraday_time, wire_points, simulation_playing
+    global circuit_errors, _edit_buttons, context_menu, canvas_menu, measuring
+
+    if index < 0 or index >= len(study_projects):
+        return False
+
+    path = study_projects[index]
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as ex:
+        print(f"Load study project error: {ex}")
+        return False
+
+    study_project_name = data.get('name', '未命名')
+    study_project_index = index
+
+    # Reset all simulation state
+    simulation_playing = False
+    faraday_active = False
+    faraday_time = 0.0
+    cap_voltages = {}
+    ind_currents = {}
+    sim_time = 0.0
+    mode = 'select'
+    selected = None
+    editing_element = None
+    context_menu = None
+    canvas_menu = None
+    measuring = False
+    _edit_buttons.clear()
+    wire_points.clear()
+    circuit_errors.clear()
+
+    cat = data.get('category', 'electrostatic')
+    current_category = cat
+    _saved_elements[cat] = _deserialize_elements(data.get('elements', []))
+    elements = _saved_elements[cat]
+
+    # Reset camera
+    camera['x'] = camera['y'] = 0.0
+    camera['zoom'] = 1.0
+    camera['angle'] = 0.0
+
+    # Recalculate tool rects for the new category
+    tool_rects.clear()
+    tool_rects.extend(get_tool_rects())
+
+    field_system.mark_dirty()
+    solve_and_update()
+    return True
+
+
+def scan_study_projects():
+    """Scan the study/ directory for numbered JSON project files."""
+    global study_projects
+    study_projects = []
+    if not os.path.isdir(STUDY_DIR):
+        return
+    try:
+        files = [f for f in os.listdir(STUDY_DIR)
+                 if f.endswith('.json') and f[0].isdigit()]
+        files.sort(key=lambda x: int(x.split('.')[0]) if x[0].isdigit() else 999)
+        study_projects = [os.path.join(STUDY_DIR, f) for f in files]
+    except Exception as ex:
+        print(f"Scan study projects error: {ex}")
+
+
+def run_study_end_screen(screen):
+    """Show end-of-study screen with '重新学习' and '退出学习' options."""
+    w, h = screen.get_size()
+    font_large = get_font(42, bold=True)
+    font_btn = get_font(26, bold=True)
+    font_sub = get_font(20)
+
+    btn_w, btn_h, gap = 360, 80, 30
+    total_h = 2 * btn_h + gap
+    base_y = int(h * 0.48)
+
+    clock_end = pygame.time.Clock()
+
+    while True:
+        mouse = pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return 'quit'
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return 'quit'
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                bx = (w - btn_w) // 2
+                y1 = base_y
+                r1 = pygame.Rect(bx, y1, btn_w, btn_h)
+                y2 = y1 + btn_h + gap
+                r2 = pygame.Rect(bx, y2, btn_w, btn_h)
+                if r1.collidepoint(event.pos):
+                    return 'restart'
+                if r2.collidepoint(event.pos):
+                    return 'home'
+
+        screen.blit(get_ambient_bg(w, h), (0, 0))
+
+        # Congratulations text
+        title = font_large.render('全部项目学习完毕！', True, TEXT_COLOR)
+        screen.blit(title, title.get_rect(center=(w // 2, int(h * 0.30))))
+
+        sub = font_sub.render('你已经完成了所有学习项目，接下来要做什么？', True, (170, 172, 196))
+        screen.blit(sub, sub.get_rect(center=(w // 2, int(h * 0.38))))
+
+        # Button 1: 重新学习
+        bx = (w - btn_w) // 2
+        y1 = base_y
+        r1 = pygame.Rect(bx, y1, btn_w, btn_h)
+        h1 = r1.collidepoint(mouse)
+        if h1:
+            draw_glow(screen, r1, CYAN, intensity=120, spread=14, radius=BTN_RADIUS)
+        draw_round_rect(screen, BTN_HOVER if h1 else BTN_NORMAL, r1, BTN_RADIUS,
+                        border_color=CYAN if h1 else BORDER)
+        t1 = font_btn.render('重新学习', True, CYAN_GLOW if h1 else TEXT_COLOR)
+        screen.blit(t1, t1.get_rect(center=r1.center))
+
+        # Button 2: 退出学习
+        y2 = y1 + btn_h + gap
+        r2 = pygame.Rect(bx, y2, btn_w, btn_h)
+        h2 = r2.collidepoint(mouse)
+        if h2:
+            draw_glow(screen, r2, PURPLE, intensity=120, spread=14, radius=BTN_RADIUS)
+        draw_round_rect(screen, BTN_HOVER if h2 else BTN_NORMAL, r2, BTN_RADIUS,
+                        border_color=PURPLE if h2 else BORDER)
+        t2 = font_btn.render('退出学习', True, PURPLE if h2 else TEXT_COLOR)
+        screen.blit(t2, t2.get_rect(center=r2.center))
+
+        foot = get_font(16).render('ESC 退出程序', True, (110, 112, 140))
+        screen.blit(foot, foot.get_rect(center=(w // 2, h - 30)))
+
+        pygame.display.flip()
+        clock_end.tick(60)
+
+
 def handle_top_action(action):
     global mode, elements, selected, simulation_playing, faraday_time, faraday_active
-    global sim_time, cap_voltages, ind_currents
+    global sim_time, cap_voltages, ind_currents, running, _exit_to_home
     if action == 'new':
         _save_undo_snapshot()
         simulation_playing = False
@@ -2346,8 +2573,31 @@ def handle_top_action(action):
     elif action == 'revert':
         _do_revert()
     elif action == 'exit':
-        global running
+        if study_mode:
+            _exit_to_home = True
+        else:
+            _exit_to_home = True
         running = False
+    elif action == 'study_next':
+        if study_mode:
+            next_idx = study_project_index + 1
+            if next_idx < len(study_projects):
+                load_study_project(next_idx)
+            else:
+                # All projects done → show end screen
+                result = run_study_end_screen(screen)
+                if result == 'restart':
+                    scan_study_projects()
+                    if study_projects:
+                        load_study_project(0)
+                    else:
+                        _exit_to_home = True
+                        running = False
+                elif result == 'home':
+                    _exit_to_home = True
+                    running = False
+                else:  # quit
+                    running = False
 
 
 # ---------------------------------------------------------------------------
@@ -2896,7 +3146,7 @@ def run_home_screen(screen):
     options = [
         {'key': 'free',  'title': '自由模式', 'sub': '自由搭建电路与电磁场，随心实验',
          'icon': '✦', 'accent': CYAN_GLOW},
-        {'key': 'learn', 'title': '学习模式', 'sub': '分步引导与示例演示（开发中）',
+        {'key': 'learn', 'title': '学习模式', 'sub': '按项目循序学习电磁学知识',
          'icon': '✎', 'accent': PURPLE},
     ]
 
@@ -2914,11 +3164,14 @@ def run_home_screen(screen):
         return rects
 
     toast_until = 0   # 「开发中」提示的失效时间戳(ms)，0=不显示
+    # 退出按钮（右下角）
+    quit_btn_w, quit_btn_h = 80, 36
 
     while True:
         now = pygame.time.get_ticks()
         mouse = pygame.mouse.get_pos()
         rects = layout(w, h)
+        quit_rect = pygame.Rect(w - quit_btn_w - 16, h - quit_btn_h - 16, quit_btn_w, quit_btn_h)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -2929,12 +3182,14 @@ def run_home_screen(screen):
                 if event.key == pygame.K_ESCAPE:
                     return 'quit'
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if quit_rect.collidepoint(event.pos):
+                    return 'quit'
                 for opt, r in zip(options, rects):
                     if r.collidepoint(event.pos):
                         if opt['key'] == 'free':
                             return 'free'
                         else:
-                            toast_until = now + 2200   # 学习模式占位提示
+                            return 'learn'
 
         # ── 绘制 ──
         screen.blit(get_ambient_bg(w, h), (0, 0))
@@ -3006,6 +3261,17 @@ def run_home_screen(screen):
         elif toast_until and now >= toast_until:
             toast_until = 0
 
+        # 退出按钮
+        q_hover = quit_rect.collidepoint(mouse)
+        if q_hover:
+            draw_glow(screen, quit_rect, (200, 60, 60), intensity=80, spread=8, radius=BTN_RADIUS)
+        q_base = (60, 30, 36) if q_hover else (40, 20, 26)
+        q_border = (240, 100, 100) if q_hover else (160, 60, 60)
+        draw_round_rect(screen, q_base, quit_rect, radius=BTN_RADIUS, border_color=q_border)
+        q_font = get_font(18, bold=True)
+        q_lbl = q_font.render('退出', True, (255, 200, 200) if q_hover else (220, 160, 160))
+        screen.blit(q_lbl, q_lbl.get_rect(center=quit_rect.center))
+
         # 底部版权/提示
         foot_font = get_font(16)
         foot = foot_font.render('ESC 退出  ·  点击卡片选择模式', True, (110, 112, 140))
@@ -3021,183 +3287,190 @@ def run_home_screen(screen):
 
 def main():
     global running, fps, faraday_time, SCREEN_W, SCREEN_H, screen, tool_rects, cat_tab_rects
+    global study_mode, _exit_to_home
 
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H), pygame.RESIZABLE | pygame.SCALED)
     pygame.display.set_caption("电磁学仿真演示程序")
 
-    # ── 主页面：选择「自由模式」/「学习模式」 ──
-    choice = run_home_screen(screen)
-    if choice == 'quit':
-        pygame.quit()
-        sys.exit()
-    # 同步窗口可能在主页被缩放后的尺寸
-    SCREEN_W, SCREEN_H = screen.get_size()
-    tool_rects.clear()
-    tool_rects.extend(get_tool_rects())
-    cat_tab_rects.clear()
-    cat_tab_rects.extend(get_cat_tab_rects())
-    # choice == 'free' → 进入现有编辑器主循环
+    # ── 外层循环：学习模式结束后可返回主页面 ──
+    while True:
+        study_mode = False
+        _exit_to_home = False
+        choice = run_home_screen(screen)
+        if choice == 'quit':
+            pygame.quit()
+            sys.exit()
 
-    pygame.key.start_text_input()
-    _apply_settings()
+        SCREEN_W, SCREEN_H = screen.get_size()
+        tool_rects.clear()
+        tool_rects.extend(get_tool_rects())
+        cat_tab_rects.clear()
+        cat_tab_rects.extend(get_cat_tab_rects())
 
-    while running:
-        clock.tick(settings['fps_target'])
-        fps = int(clock.get_fps())
+        if choice == 'learn':
+            study_mode = True
+            scan_study_projects()
+            if study_projects:
+                load_study_project(0)
+            else:
+                study_mode = False
 
-        # --- Events ---
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+        running = True
+        pygame.key.start_text_input()
+        _apply_settings()
 
-            elif event.type == pygame.VIDEORESIZE:
-                SCREEN_W, SCREEN_H = event.w, event.h
-                tool_rects.clear()
-                tool_rects.extend(get_tool_rects())
-                cat_tab_rects.clear()
-                cat_tab_rects.extend(get_cat_tab_rects())
+        while running:
+            clock.tick(settings['fps_target'])
+            fps = int(clock.get_fps())
+
+            # --- Events ---
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+
+                elif event.type == pygame.VIDEORESIZE:
+                    SCREEN_W, SCREEN_H = event.w, event.h
+                    tool_rects.clear()
+                    tool_rects.extend(get_tool_rects())
+                    cat_tab_rects.clear()
+                    cat_tab_rects.extend(get_cat_tab_rects())
+                    field_system.mark_dirty()
+
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    handle_mousedown(event.button, event.pos)
+
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    handle_mouseup(event.button, event.pos)
+
+                elif event.type == pygame.MOUSEMOTION:
+                    handle_mousemotion(event.pos, event.rel)
+
+                elif event.type == pygame.MOUSEWHEEL:
+                    mx, my = pygame.mouse.get_pos()
+                    if mx >= TOOLBAR_W and my >= TOP_BAR_H:
+                        handle_scroll(event.y, (mx, my))
+
+                elif event.type == pygame.KEYDOWN:
+                    handle_keydown(event.key)
+
+                elif event.type == pygame.TEXTINPUT:
+                    if _active_input is not None:
+                        _active_input['text'] += event.text
+
+            # --- Physics update ---
+            dt = 1.0 / 60
+            for e in elements:
+                if isinstance(e, Wire):
+                    e.update_particles(dt)
+
+            if simulation_playing:
+                global sim_time, cap_voltages, ind_currents
+                sim_dt = dt * sim_speed
+                pure_ac, ac_freq = _is_pure_ac_circuit()
+                if pure_ac:
+                    currents, node_v, circuit_errors = solve_ac(elements, frequency=ac_freq)
+                    sim_time += sim_dt
+                    for e in elements:
+                        if isinstance(e, Wire) and e.auto_current:
+                            e.current = abs(currents.get(e, 0j))
+                            e.is_ac = True
+                        elif isinstance(e, ActiveElement):
+                            e.current = abs(currents.get(e, 0j))
+                    cv = _cap_voltages_from_nodes(node_v)
+                    for e in elements:
+                        if isinstance(e, Capacitor):
+                            e.voltage = cv.get(e, 0.0)
+                    _update_meters_phasor(currents, node_v)
+                else:
+                    n_sub = max(1, min(50, int(sim_dt / 0.002)))
+                    sub_dt = sim_dt / n_sub
+                    for _ in range(n_sub):
+                        sim_time += sub_dt
+                        currents, circuit_errors, cap_voltages, ind_currents = solve_circuit(
+                            elements, dt=sub_dt, time=sim_time,
+                            cap_voltages=cap_voltages, ind_currents=ind_currents)
+                        _update_meter_peaks(currents)
+                    for e in elements:
+                        if isinstance(e, Wire) and e.auto_current:
+                            e.current = currents.get(e, 0.0)
+                            e.is_ac = _has_ac_source()
+                        elif isinstance(e, ActiveElement):
+                            e.current = currents.get(e, 0.0)
+                    for e in elements:
+                        if isinstance(e, Capacitor):
+                            e.voltage = cap_voltages.get(e, 0.0)
+                    _update_meters(currents)
                 field_system.mark_dirty()
-
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                handle_mousedown(event.button, event.pos)
-
-            elif event.type == pygame.MOUSEBUTTONUP:
-                handle_mouseup(event.button, event.pos)
-
-            elif event.type == pygame.MOUSEMOTION:
-                handle_mousemotion(event.pos, event.rel)
-
-            elif event.type == pygame.MOUSEWHEEL:
-                # event.y is the scroll amount; event.x is the mouse position
-                # (on newer pygame, use pygame.mouse.get_pos())
-                mx, my = pygame.mouse.get_pos()
-                # Only scroll in canvas area
-                if mx >= TOOLBAR_W and my >= TOP_BAR_H:
-                    handle_scroll(event.y, (mx, my))
-
-            elif event.type == pygame.KEYDOWN:
-                handle_keydown(event.key)
-
-            elif event.type == pygame.TEXTINPUT:
-                if _active_input is not None:
-                    _active_input['text'] += event.text
-
-        # --- Physics update ---
-        dt = 1.0 / 60
-        for e in elements:
-            if isinstance(e, Wire):
-                e.update_particles(dt)
-
-        if simulation_playing:
-            global sim_time, cap_voltages, ind_currents
-            sim_dt = dt * sim_speed
-            pure_ac, ac_freq = _is_pure_ac_circuit()
-            if pure_ac:
-                # AC steady-state phasor solver — exact, no sub-stepping or peak tracking
-                currents, node_v, circuit_errors = solve_ac(elements, frequency=ac_freq)
-                sim_time += sim_dt
-                for e in elements:
-                    if isinstance(e, Wire) and e.auto_current:
-                        e.current = abs(currents.get(e, 0j))
-                        e.is_ac = True
-                    elif isinstance(e, ActiveElement):
-                        e.current = abs(currents.get(e, 0j))
-                cv = _cap_voltages_from_nodes(node_v)
-                for e in elements:
-                    if isinstance(e, Capacitor):
-                        e.voltage = cv.get(e, 0.0)
-                _update_meters_phasor(currents, node_v)
-            else:
-                # Transient solver with sub-stepping
-                n_sub = max(1, min(50, int(sim_dt / 0.002)))
-                sub_dt = sim_dt / n_sub
-                for _ in range(n_sub):
-                    sim_time += sub_dt
-                    currents, circuit_errors, cap_voltages, ind_currents = solve_circuit(
-                        elements, dt=sub_dt, time=sim_time,
-                        cap_voltages=cap_voltages, ind_currents=ind_currents)
-                    _update_meter_peaks(currents)
-                for e in elements:
-                    if isinstance(e, Wire) and e.auto_current:
-                        e.current = currents.get(e, 0.0)
-                        e.is_ac = _has_ac_source()
-                    elif isinstance(e, ActiveElement):
-                        e.current = currents.get(e, 0.0)
-                for e in elements:
-                    if isinstance(e, Capacitor):
-                        e.voltage = cap_voltages.get(e, 0.0)
-                _update_meters(currents)
-            field_system.mark_dirty()
-            # Motion charges
-            mcs = [e for e in elements if isinstance(e, MotionCharge)]
-            for e in mcs:
-                e.update(field_system, elements, sim_dt)
-            collided = MotionCharge.resolve_all_collisions(mcs, elements)
-            if record_trail:
+                mcs = [e for e in elements if isinstance(e, MotionCharge)]
                 for e in mcs:
-                    if e not in collided and not e.fixed:
-                        e.trail.append((e.x, e.y))
-            if faraday_active:
-                faraday_time += sim_dt
-                # Oscillate all magnets to create changing B-field
-                for e in elements:
-                    if isinstance(e, (Magnet, HorseshoeMagnet)):
-                        omega = 2 * math.pi * 1.5
-                        if not hasattr(e, '_faraday_ox'):
-                            e._faraday_ox = e.x
-                        e.x = e._faraday_ox + 80.0 * math.sin(omega * faraday_time)
+                    e.update(field_system, elements, sim_dt)
+                collided = MotionCharge.resolve_all_collisions(mcs, elements)
+                if record_trail:
+                    for e in mcs:
+                        if e not in collided and not e.fixed:
+                            e.trail.append((e.x, e.y))
+                if faraday_active:
+                    faraday_time += sim_dt
+                    for e in elements:
+                        if isinstance(e, (Magnet, HorseshoeMagnet)):
+                            omega = 2 * math.pi * 1.5
+                            if not hasattr(e, '_faraday_ox'):
+                                e._faraday_ox = e.x
+                            e.x = e._faraday_ox + 80.0 * math.sin(omega * faraday_time)
 
-        # --- Rotation slider: direct polling ---
-        if not global_panel_open and _rotation_slider_rect and pygame.mouse.get_pressed()[0]:
-            global _skip_slider_poll
-            if _skip_slider_poll:
-                _skip_slider_poll = False
-            else:
+            # --- Rotation slider: direct polling ---
+            if not global_panel_open and _rotation_slider_rect and pygame.mouse.get_pressed()[0]:
+                global _skip_slider_poll
+                if _skip_slider_poll:
+                    _skip_slider_poll = False
+                else:
+                    mx, my = pygame.mouse.get_pos()
+                    if _rotation_slider_rect.collidepoint((mx, my)):
+                        _set_angle_from_mouse(mx)
+
+            # --- Global panel sliders: direct polling ---
+            if global_panel_open and pygame.mouse.get_pressed()[0]:
                 mx, my = pygame.mouse.get_pos()
-                if _rotation_slider_rect.collidepoint((mx, my)):
-                    _set_angle_from_mouse(mx)
+                for sl in _gs_sliders:
+                    dr = sl['detect_rect']
+                    if dr and dr.collidepoint((mx, my)):
+                        frac = (mx - sl['track_x']) / sl['track_w']
+                        frac = max(0.0, min(1.0, frac))
+                        raw = sl['vmin'] + frac * (sl['vmax'] - sl['vmin'])
+                        stepped = round(raw / sl['vstep']) * sl['vstep']
+                        stepped = max(sl['vmin'], min(sl['vmax'], stepped))
+                        if sl['key'] == 'field_density' and settings['field_density'] != stepped:
+                            settings['field_density'] = stepped
+                            _apply_settings()
+                        break
 
-        # --- Global panel sliders: direct polling ---
-        if global_panel_open and pygame.mouse.get_pressed()[0]:
-            mx, my = pygame.mouse.get_pos()
-            for sl in _gs_sliders:
-                dr = sl['detect_rect']
-                if dr and dr.collidepoint((mx, my)):
-                    frac = (mx - sl['track_x']) / sl['track_w']
-                    frac = max(0.0, min(1.0, frac))
-                    raw = sl['vmin'] + frac * (sl['vmax'] - sl['vmin'])
-                    stepped = round(raw / sl['vstep']) * sl['vstep']
-                    stepped = max(sl['vmin'], min(sl['vmax'], stepped))
-                    if sl['key'] == 'field_density' and settings['field_density'] != stepped:
-                        settings['field_density'] = stepped
-                        _apply_settings()
-                    break
+            # --- Draw ---
+            screen.blit(get_ambient_bg(SCREEN_W, SCREEN_H), (0, 0))
+            _draw_scene(screen, screen, elements, field_system, camera, mode,
+                        wire_points, faraday_active, faraday_time, dt,
+                        show_efield, show_bfield)
 
-        # --- Draw (coordinate-transform rotation — no intermediate canvas) ---
-        screen.blit(get_ambient_bg(SCREEN_W, SCREEN_H), (0, 0))
-        _draw_scene(screen, screen, elements, field_system, camera, mode,
-                    wire_points, faraday_active, faraday_time, dt,
-                    show_efield, show_bfield)
+            _draw_rotation_slider(screen)
 
-        # Rotation slider (bottom-right)
-        _draw_rotation_slider(screen)
+            draw_top_bar(screen)
+            draw_study_title(screen)
+            draw_left_toolbar(screen)
+            draw_mode_hint(screen)
+            draw_edit_panel(screen)
+            draw_selected_info(screen)
+            draw_circuit_warnings(screen)
+            draw_context_menu(screen)
+            draw_canvas_menu(screen)
+            draw_measurement(screen)
+            draw_global_panel(screen)
 
-        # UI overlay
-        draw_top_bar(screen)
-        draw_left_toolbar(screen)
-        draw_mode_hint(screen)
-        draw_edit_panel(screen)
-        draw_selected_info(screen)
-        draw_circuit_warnings(screen)
-        draw_context_menu(screen)
-        draw_canvas_menu(screen)
-        draw_measurement(screen)
-        draw_global_panel(screen)
+            pygame.display.flip()
 
-        pygame.display.flip()
+        _cleanup_temp_files()
+        if not _exit_to_home:
+            break
 
-    _cleanup_temp_files()
     pygame.quit()
     sys.exit()
 

@@ -966,6 +966,50 @@ class Power(ActiveElement):
         self.mode = mode      # 'DC' or 'AC'
         self.frequency = float(frequency)
         self.switched_on = False
+    def draw(self, surface, camera, screen_size):
+        """Draw the Power sprite plus a floating label box below it."""
+        sw, sh = screen_size
+        sx, sy = world_to_screen(self.x, self.y, camera, sw, sh)
+        zoom = camera['zoom']
+        w = max(20, int(self.elem_width * zoom))
+        h = max(20, int(self.elem_height * zoom))
+
+        # Draw the sprite via ActiveElement
+        ActiveElement.draw(self, surface, camera, screen_size)
+
+        # ── Floating label box below the element ──────────────────
+        sep = "~" if self.mode == 'AC' else "="
+        text = f"{self.ptype}{sep}{self.value}"
+        lbl_size = max(10, int(18 * zoom))
+        f_lbl = get_element_font(lbl_size, bold=False)
+        lbl = f_lbl.render(text, True, (220, 220, 240))
+
+        pad_x, pad_y = 8, 4
+        box_w = lbl.get_width() + pad_x * 2
+        box_h = lbl.get_height() + pad_y * 2
+        box_x = int(sx - box_w // 2)
+        box_y = int(sy + h // 2 + max(2, 3 * zoom))
+
+        # Background card
+        card = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        card_rect = card.get_rect()
+        pygame.draw.rect(card, (20, 18, 36, 210), card_rect, border_radius=6)
+        pygame.draw.rect(card, (62, 56, 96, 180), card_rect, 1, border_radius=6)
+        surface.blit(card, (box_x, box_y))
+
+        # Text
+        surface.blit(lbl, (box_x + pad_x, box_y + pad_y))
+
+        # On/Off indicator
+        state_text = "ON" if self.switched_on else "OFF"
+        state_size = max(8, int(13 * zoom))
+        f_state = get_element_font(state_size, bold=True)
+        state_color = (80, 220, 80) if self.switched_on else (160, 80, 80)
+        state_lbl = f_state.render(state_text, True, state_color)
+        state_x = box_x + box_w + 4
+        state_y = box_y + (box_h - state_lbl.get_height()) // 2
+        surface.blit(state_lbl, (state_x, state_y))
+
     def _switch_center(self, w, h):
         """Return (cx, cy, r) of the switch button in sprite-local coords."""
         cx, cy = w // 2, h // 2
@@ -987,20 +1031,18 @@ class Power(ActiveElement):
         surf.blit(disk, (cx - r - 2, cy - r - 2))
         pygame.draw.circle(surf, (236, 82, 82), (cx, cy), r, lw)
         pygame.draw.circle(surf, (255, 130, 130), (cx, cy), max(1, r - lw), 1)
-        f = get_element_font(max(10, r), bold=True)
+
+        # +/- signs at left/right
+        sym_size = max(14, min(r, 32))
+        f_sym = get_element_font(sym_size, bold=True)
         if self.mode == 'DC':
-            plus = f.render("+", True, (255, 255, 255))
-            minus = f.render("−", True, (255, 255, 255))
+            plus = f_sym.render("+", True, (255, 255, 255))
+            minus = f_sym.render("-", True, (255, 255, 255))
             surf.blit(plus, plus.get_rect(center=(cx - r // 2, cy)))
             surf.blit(minus, minus.get_rect(center=(cx + r // 2, cy)))
         else:
-            tilde = f.render("~", True, (255, 255, 100))
+            tilde = f_sym.render("~", True, (255, 255, 100))
             surf.blit(tilde, tilde.get_rect(center=(cx, cy)))
-        # Type label below
-        f2 = get_element_font(max(8, r - 4))
-        sep = "~" if self.mode == 'AC' else "="
-        lbl = f2.render(f"{self.ptype}{sep}{self.value}", True, (200, 200, 220))
-        surf.blit(lbl, lbl.get_rect(center=(cx, cy + r + 4)))
 
         # ── Switch button (top of the circle) ──────────────────────
         scx, scy, sr = self._switch_center(w, h)

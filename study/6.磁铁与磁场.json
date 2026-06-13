@@ -1,0 +1,8 @@
+{
+  "name": "6. 磁铁与磁场",
+  "category": "magnetic",
+  "description": "观察条形磁铁周围的磁场分布。磁场线从N极出发进入S极，形成闭合曲线。",
+  "elements": [
+    {"type": "Magnet", "x": 0, "y": 0, "strength": 100, "angle": 0, "length": 120, "height": 40}
+  ]
+}
