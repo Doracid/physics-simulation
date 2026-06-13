@@ -9,16 +9,19 @@ An interactive physics simulation platform built with **Pygame** and **Python**,
 - **AC Circuit Solver** — steady-state AC analysis using complex impedance
 - **Charged Particle Dynamics** — simulate motion of charged particles under electromagnetic fields
 - **Interactive Elements** — drag, place, rotate, and connect components in real time
+- **Study Mode** — guided, pre-configured projects covering electrostatics, circuits, and magnetic fields with a built-in lesson flow
+- **Free Mode** — sandbox environment with all elements available for open-ended exploration
 
 ## Project Structure
 
-| File | Description |
+| File / Folder | Description |
 |---|---|
-| `main.py` | Main entry point — Pygame GUI, user interaction, rendering loop |
-| `elements.py` | All interactive element classes (Charge, Magnet, Wire, Resistor, etc.) |
+| `main.py` | Main entry point — Pygame GUI, home screen, user interaction, rendering loop |
+| `elements.py` | All interactive element classes (Charge, Magnet, Wire, Resistor, Power, etc.) |
 | `physics.py` | Physics engine — field calculation, force computation |
 | `circuit.py` | DC circuit solver (Kirchhoff's laws, nodal analysis) |
 | `ac_solver.py` | AC steady-state solver (complex impedance, phasor analysis) |
+| `study/` | Pre-built lesson packages (JSON) for study mode |
 
 ## Getting Started
 
@@ -45,6 +48,31 @@ python main.py
 - **Right-click** — remove element / open context menu
 - **Mouse wheel** — zoom in / out
 - **Toolbar buttons** — select element type, toggle simulation
+- **Simulate** — start/pause real-time field and circuit simulation
+
+## Modes
+
+### Free Mode
+Sandbox environment with access to all elements. Click the **退出** button to return to the home screen.
+
+### Study Mode
+A structured learning path with pre-configured projects (numbered `1.xxx` to `7.xxx`):
+1. **单个正点电荷的电场** — Electric field of a single point charge
+2. **等量异种点电荷** — Electric field of two opposite charges
+3. **平行板电容器** — Parallel plate capacitor
+4. **简单直流电路** — Simple DC circuit
+5. **串联电路** — Series circuit
+6. **磁铁与磁场** — Magnet and magnetic field
+7. **带电粒子在磁场中运动** — Charged particle motion in a magnetic field
+
+Navigate projects using the **下一个** (Next) button in the top bar. At the end of the lesson sequence, choose **重新学习** (Re-learn) to restart or **退出学习** (Exit Study) to return to the home screen.
+
+## Recent Updates
+
+- Study mode with 7 guided lesson projects
+- Power element: floating label display with larger +/- symbols
+- Free mode exit returns to home screen
+- Home screen: visible quit button (bottom-right)
 
 ## License
 
