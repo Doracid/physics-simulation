@@ -1,8 +1,0 @@
-{
-  "name": "1. 单个正点电荷的电场",
-  "category": "electrostatic",
-  "description": "观察单个正点电荷周围的电场分布。电场线从正电荷出发，向外辐射。",
-  "elements": [
-    {"type": "Charge", "x": 0, "y": 0, "q": 1e-6, "radius": 30}
-  ]
-}

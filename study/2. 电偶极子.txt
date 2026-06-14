@@ -1,0 +1,7 @@
+# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
+# CATEGORY | electrostatic
+# CAMERA | 0.0 | 0.0 | 1.0
+# FARADAY | 0
+TEXTBOX | 3 | -419.0 | -345.0 | 224,224,240 | 电偶极子——电场线从正到负，等势面呈哑铃型 | 450.0 | 40.0 | 16
+CHARGE | 4 | -150.0 | 0.0 | 255,50,50 | 3e-06
+CHARGE | 5 | 150.0 | 0.0 | 50,50,255 | -3e-06

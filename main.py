@@ -260,29 +260,41 @@ def zoom_at(screen_pos, factor):
     new = max(0.1, min(5.0, old * factor))
     if new == old:
         return
-    mx, my = screen_pos
-    wx = (mx - SCREEN_W / 2) / old + camera['x']
-    wy = (my - SCREEN_H / 2) / old + camera['y']
     camera['zoom'] = new
-    camera['x'] = wx - (mx - SCREEN_W / 2) / new
-    camera['y'] = wy - (my - SCREEN_H / 2) / new
+    # Camera is locked to (0,0) — zoom always centers on origin
 
 
 SNAP_THRESHOLD = 15  # world-coord distance for terminal snapping
 
 
-def snap_to_terminal(wx, wy, elements):
-    """Snap (wx, wy) to the nearest circuit component terminal if close enough."""
+def snap_to_terminal(wx, wy, elements, wire_points=None):
+    """Snap (wx, wy) to the nearest terminal or wire endpoint if close enough.
+
+    wire_points : list | None  — current wire being drawn (to close loops).
+    """
     best_d = SNAP_THRESHOLD
     best = (wx, wy)
     for e in elements:
-        if not isinstance(e, ActiveElement):
-            continue
-        for cx, cy in e.get_connection_points():
-            d = math.hypot(wx - cx, wy - cy)
-            if d < best_d:
-                best_d = d
-                best = (cx, cy)
+        if isinstance(e, ActiveElement):
+            for cx, cy in e.get_connection_points():
+                d = math.hypot(wx - cx, wy - cy)
+                if d < best_d:
+                    best_d = d
+                    best = (cx, cy)
+        elif isinstance(e, Wire):
+            # Snap to wire endpoints (first and last point)
+            for pt in (e.points[0], e.points[-1]):
+                d = math.hypot(wx - pt[0], wy - pt[1])
+                if d < best_d:
+                    best_d = d
+                    best = (pt[0], pt[1])
+    # Also snap to the starting point of the wire being drawn
+    if wire_points and len(wire_points) > 0:
+        sx, sy = wire_points[0]
+        d = math.hypot(wx - sx, wy - sy)
+        if d < best_d:
+            best_d = d
+            best = (sx, sy)
     return best
 
 
@@ -455,9 +467,220 @@ def solve_and_update():
     field_system.mark_dirty()
 
 
-# ---------------------------------------------------------------------------
-# UI definitions
-# ---------------------------------------------------------------------------
+# ── Faraday's law: electromagnetic induction ──────────────────────────
+
+def _find_wire_loops(elements):
+    """Find closed wire loops for flux computation using fundamental cycles.
+
+    Returns list of (points_list, approx_resistance).
+    """
+    from collections import defaultdict
+
+    graph = defaultdict(set)    # node_key → {neighbor_key, ...}
+    edge_map = {}               # (node_a, node_b) → list of elements on that edge
+
+    def node_key(x, y):
+        return (round(x, 1), round(y, 1))
+
+    def add_edge(a, b, elem):
+        na, nb = node_key(*a), node_key(*b)
+        if na == nb:
+            return
+        graph[na].add(nb)
+        graph[nb].add(na)
+        ek = (min(na, nb), max(na, nb))
+        edge_map.setdefault(ek, []).append(elem)
+
+    for e in elements:
+        if isinstance(e, Wire):
+            pts = e.points
+            for i in range(len(pts) - 1):
+                add_edge(pts[i], pts[i+1], e)
+            # Close the loop if first and last points are close
+            if len(pts) >= 3:
+                d = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+                if d < SNAP_THRESHOLD:
+                    add_edge(pts[-1], pts[0], e)
+        elif isinstance(e, ActiveElement):
+            a, b = e.get_connection_points()
+            add_edge(a, b, e)
+
+    if not graph:
+        return []
+
+    # ── Find fundamental cycles via DFS spanning tree ──
+    parent = {}
+    tree_edges = set()
+    all_edges = set()
+    visited = set()
+
+    def dfs(n, p):
+        visited.add(n)
+        parent[n] = p
+        for nb in graph[n]:
+            ek = (min(n, nb), max(n, nb))
+            all_edges.add(ek)
+            if nb == p:
+                continue
+            if nb not in visited:
+                tree_edges.add(ek)
+                dfs(nb, n)
+
+    for n in graph:
+        if n not in visited:
+            dfs(n, None)
+
+    back_edges = {e for e in all_edges if e not in tree_edges}
+
+    # Reconstruct tree path for each back edge
+    def tree_path(u, v):
+        """Return list of nodes from u up to v via DFS tree (v inclusive)."""
+        # Walk from u up to root, same for v, then find junction
+        path_u = []
+        while u is not None:
+            path_u.append(u)
+            if u == v:
+                return path_u
+            u = parent.get(u)
+        path_v = []
+        while v is not None:
+            path_v.append(v)
+            v = parent.get(v)
+        # Find junction
+        set_u = set(path_u)
+        for n in path_v:
+            if n in set_u:
+                junction = n
+                break
+        else:
+            return []
+        # Build path: u → ... → junction → ... → v
+        u_to_j = []
+        for n in path_u:
+            u_to_j.append(n)
+            if n == junction:
+                break
+        v_to_j = []
+        for n in path_v:
+            if n == junction:
+                break
+            v_to_j.append(n)
+        # v_to_j goes from v upward; reverse to get junction → ... → v
+        return u_to_j + list(reversed(v_to_j))
+
+    loops = []
+    seen = set()
+
+    for u, v in back_edges:
+        path = tree_path(u, v)
+        if len(path) < 3:  # need at least 3 nodes for a polygon
+            continue
+        # Compute area
+        area = 0.0
+        n = len(path)
+        for i in range(n):
+            x1, y1 = path[i]
+            x2, y2 = path[(i + 1) % n]
+            area += x1 * y2 - x2 * y1
+        area = area / 2.0
+        if abs(area) < 20:  # minimum area threshold (px²)
+            continue
+        # Deduplicate: use sorted tuple of vertices as key
+        key = tuple(sorted(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        # Estimate total resistance along the cycle
+        total_R = 0.0
+        for i in range(len(path) - 1):
+            a, b = path[i], path[i+1]
+            ek = (min(a, b), max(a, b))
+            for elem in edge_map.get(ek, []):
+                if isinstance(elem, Wire):
+                    seg_len = math.hypot(a[0]-b[0], a[1]-b[1])
+                    total_R += 0.01 / max(1, len(elem.points)-1) * seg_len
+                elif hasattr(elem, 'resistance'):
+                    total_R += elem.resistance
+                elif isinstance(elem, (Ammeter, Voltmeter)):
+                    total_R += getattr(elem, 'R_METER', 1.0)
+        # Collect wire elements on this cycle
+        wire_elems = []
+        for i in range(len(path) - 1):
+            a, b = path[i], path[i+1]
+            ek = (min(a, b), max(a, b))
+            for elem in edge_map.get(ek, []):
+                if isinstance(elem, Wire) and elem not in wire_elems:
+                    wire_elems.append(elem)
+        loops.append((path, total_R, wire_elems))
+
+    return loops
+
+
+def _compute_induced_emfs(elements, loops, field_system, dt, faraday_time=0.0):
+    """Compute induced EMF for all solenoids and closed wire loops.
+
+    Returns dict:
+        Solenoid → induced voltage (V)
+        ('loop_current', id) → (pts_list, I_ind, wire_elems)
+
+    Also updates _flux_history for the next timestep.
+    """
+    global _flux_history, _loop_cache
+    induced = {}
+
+    # ── 1. Solenoids ──
+    for e in elements:
+        if isinstance(e, Solenoid):
+            try:
+                flux = field_system.compute_solenoid_flux(e, elements)
+            except Exception:
+                continue
+            key = ('sol', id(e))
+            flux_prev = _flux_history.get(key, flux)
+            _flux_history[key] = flux
+            if abs(dt) > 1e-15:
+                dflux_dt = (flux - flux_prev) / dt
+                # Induced EMF: ε = -N·dΦ/dt (Lenz's law)
+                emf = -e.turns * dflux_dt
+                induced[e] = emf
+
+    # ── 2. Wire loops ──
+    # Build mapping: rounded node_key → actual unrounded coordinates
+    # (avoids flux jumps from node_key rounding to 1dp)
+    _key_to_actual = {}
+    for e in elements:
+        if isinstance(e, Wire):
+            for pt in e.points:
+                _key_to_actual[(round(pt[0], 1), round(pt[1], 1))] = tuple(pt)
+
+    _loop_cache = loops
+
+    for pts_rounded, total_R, wire_elems in loops:
+        # Reconstruct polygon with actual coordinates
+        pts = [_key_to_actual.get(nk, nk) for nk in pts_rounded]
+        flux = field_system.compute_loop_flux(pts, elements, faraday_time)
+        # Use stable key from wire element ids (survives coordinate changes)
+        wire_key = frozenset(id(w) for w in wire_elems) if wire_elems else frozenset(pts_rounded)
+        key = ('loop', wire_key)
+        flux_prev = _flux_history.get(key, flux)
+        _flux_history[key] = flux
+        if abs(dt) > 1e-15 and total_R > 1e-10:
+            dflux_dt = (flux - flux_prev) / dt
+            emf = -dflux_dt
+            I_ind = emf / total_R
+            induced[('loop_current', id(pts_rounded))] = (pts, I_ind, wire_elems)
+
+    return induced
+
+
+def _apply_loop_currents(induced, elements):
+    """Apply induced currents from wire loops directly to wire segments."""
+    for key, val in list(induced.items()):
+        if isinstance(key, tuple) and key[0] == 'loop_current':
+            pts, I_ind, wire_elems = val
+            for w in wire_elems:
+                if w in elements and w.auto_current:
+                    w.current = I_ind
 categories = ['electrostatic', 'circuit', 'magnetic']
 category_labels = {'electrostatic': '静电学', 'circuit': '电流学', 'magnetic': '磁学'}
 
@@ -565,19 +788,16 @@ def get_top_button_rects():
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
-_saved_elements = {'electrostatic': [], 'circuit': [], 'magnetic': []}
+_pool = []  # single shared list for all categories
+_saved_elements = {'electrostatic': _pool, 'circuit': _pool, 'magnetic': _pool}
 current_category = 'electrostatic'
-elements = _saved_elements['electrostatic']  # alias to current category's list
+elements = _saved_elements['electrostatic']  # alias to the shared pool
 selected = None
 mode = 'select'
 
 dragging = False
 drag_start_mouse = None
 drag_start_pos = None
-
-panning = False
-pan_start_mouse = None
-pan_start_camera = None
 
 tool_rects = get_tool_rects()
 top_btn_rects = get_top_button_rects()
@@ -614,6 +834,11 @@ sim_time = 0.0
 # Transient circuit state (capacitor voltages, inductor currents)
 cap_voltages = {}
 ind_currents = {}
+
+# Faraday's law: flux tracking for electromagnetic induction
+_flux_history = {}       # {id(loop/solenoid): previous_flux}
+_loop_cache = []
+_induced_display = []    # [(center_x, center_y, emf, current, resistance), ...]         # cached list of (points, resistance, element) for each found loop
 
 # Simulation speed
 sim_speed = 1.0
@@ -699,7 +924,8 @@ def _serialize_elements(elems):
                          'thickness': e.thickness})
         elif isinstance(e, Wire):
             data.append({'type': 'Wire', 'points': e.points, 'current': e.current,
-                         'auto_current': e.auto_current})
+                         'auto_current': e.auto_current,
+                         'vx': e.vx, 'vy': e.vy})
         elif isinstance(e, Power):
             data.append({'type': 'Power', 'x': e.x, 'y': e.y,
                          'ptype': e.ptype, 'value': e.value,
@@ -774,6 +1000,8 @@ def _deserialize_elements(data):
             elif typ == 'Wire':
                 e = Wire(d['points'], current=d['current'])
                 e.auto_current = d.get('auto_current', True)
+                e.vx = d.get('vx', 0.0)
+                e.vy = d.get('vy', 0.0)
             elif typ == 'Power':
                 e = Power(d['x'], d['y'], ptype=d['ptype'], value=d['value'],
                           angle=d['angle'], mode=d.get('mode', 'DC'))
@@ -862,7 +1090,7 @@ def _save_undo_snapshot():
 def _do_undo():
     """Step back one undo level (pop the latest snapshot)."""
     global _undo_dir, _undo_stack, elements, selected
-    global cap_voltages, ind_currents, sim_time
+    global cap_voltages, ind_currents, sim_time, _flux_history
     if not _undo_stack:
         return
     try:
@@ -871,11 +1099,11 @@ def _do_undo():
             data = json.load(f)
         os.remove(path)
         new_elems = _deserialize_elements(data)
-        _saved_elements[current_category] = new_elems
-        elements = _saved_elements[current_category]
+        elements[:] = new_elems
         selected = None
         cap_voltages = {}
         ind_currents = {}
+        _flux_history.clear()
         sim_time = 0.0
         field_system.mark_dirty()
         solve_and_update()
@@ -902,8 +1130,7 @@ def _do_revert():
     sim_time = 0.0
     try:
         new_elems = _deserialize_elements(_presnap_elements)
-        _saved_elements[current_category] = new_elems
-        elements = _saved_elements[current_category]
+        elements[:] = new_elems
         selected = None
         field_system.mark_dirty()
         solve_and_update()
@@ -920,6 +1147,8 @@ def _cleanup_temp_files():
             shutil.rmtree(_undo_dir)
         except Exception:
             pass
+    _undo_dir = None
+    _undo_stack.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1220,7 @@ def draw_grid(surface):
 def _draw_scene(surface, _, elements, field_system, camera, mode, wire_points,
                 faraday_active, faraday_time, dt, show_efield, show_bfield):
     """Draw the simulation scene (grid + elements + field lines + wire preview)."""
+    global _induced_display
     draw_grid(surface)
     # Elements (non-Charge first)
     for e in elements:
@@ -1014,6 +1244,37 @@ def _draw_scene(surface, _, elements, field_system, camera, mode, wire_points,
     # Wire drawing preview
     _draw_wire_preview(surface, camera, mode, wire_points, elements)
 
+    # Induced EMF / current labels
+    if _induced_display:
+        zoom = camera['zoom']
+        try:
+            font = pygame.font.Font(None, max(18, int(20 * zoom)))
+        except Exception:
+            font = None
+        for cx, cy, emf, I_ind, total_R in _induced_display:
+            sp = world_to_screen(cx, cy)
+            sp = (int(sp[0]), int(sp[1] - 20 * zoom))
+            abs_I = abs(I_ind)
+            if abs_I > 0.1:
+                label = f"ε={emf:.3f}V  I={abs_I:.2f}A"
+            elif abs_I > 0.001:
+                label = f"ε={emf:.4f}V  I={abs_I:.3f}A"
+            else:
+                label = f"ε={emf:.4f}V  I={abs_I:.4f}A"
+            if font:
+                txt = font.render(label, True, (255, 255, 200))
+                tw, th = txt.get_size()
+                pad = 4
+                bx = sp[0] - tw // 2 - pad
+                by = sp[1] - th // 2 - pad
+                lbl_bg = pygame.Surface((tw + pad * 2, th + pad * 2))
+                lbl_bg.set_alpha(200)
+                lbl_bg.fill((20, 20, 40))
+                surface.blit(lbl_bg, (bx, by))
+                if abs_I > 0.001:
+                    pygame.draw.rect(surface, (100, 255, 100), (bx, by, tw + pad * 2, th + pad * 2), 1)
+                surface.blit(txt, (sp[0] - tw // 2, sp[1] - th // 2))
+
 
 def _draw_wire_preview(surface, camera, mode, wire_points, elements):
     """Wire terminal points + drawing preview."""
@@ -1032,12 +1293,14 @@ def _draw_wire_preview(surface, camera, mode, wire_points, elements):
     if wire_points:
         zoom = camera['zoom']
         pts = [(int(p[0]), int(p[1])) for p in [world_to_screen(wx, wy) for wx, wy in wire_points]]
+        # Green dot at the start point (valid connection target to close the loop)
+        pygame.draw.circle(surface, (100, 255, 100), pts[0], max(3, int(3 * zoom)))
         if len(pts) > 1:
             pygame.draw.lines(surface, (200, 150, 50), False, pts, 2)
             mx, my = pygame.mouse.get_pos()
             if mx >= TOOLBAR_W and my >= TOP_BAR_H:
                 wx, wy = screen_to_world(mx, my)
-                sx, sy = snap_to_terminal(wx, wy, elements)
+                sx, sy = snap_to_terminal(wx, wy, elements, wire_points)
                 lx, ly = wire_points[-1]
                 ox, oy = ortho_snap(lx, ly, sx, sy)
                 sp = world_to_screen(sx, sy)
@@ -1684,6 +1947,8 @@ def draw_edit_panel(surface):
     elif isinstance(e, HorseshoeMagnet):
         _est_input("强度 =", 50); _est_input("角度 =", 55)
     elif isinstance(e, Wire):
+        _est_input("x速度 =", 55)
+        _est_input("y速度 =", 55)
         if e.auto_current:
             _est_label(f"I = {e.current:+.2f} A (自动)")
             _est_btn()
@@ -1834,6 +2099,8 @@ def draw_edit_panel(surface):
         _input("角度 =", 'angle', None, 55)
 
     elif isinstance(e, Wire):
+        _input("x速度 =", 'vx', '.1f', 55)
+        _input("y速度 =", 'vy', '.1f', 55)
         if e.auto_current:
             lbl = font.render(f"I = {e.current:+.2f} A (自动)", True, TEXT_COLOR)
             surface.blit(lbl, (x, py + 11))
@@ -1945,7 +2212,6 @@ def draw_edit_panel(surface):
 
 def handle_mousedown(btn, pos):
     global mode, elements, selected, dragging, drag_start_mouse, drag_start_pos
-    global panning, pan_start_mouse, pan_start_camera
     global context_menu, faraday_active, record_trail, current_category, editing_element, measuring, global_panel_open
     global _resize_target, _resize_handle, _resize_start_mouse, _resize_start_vals, _scrub_target
 
@@ -2067,7 +2333,6 @@ def handle_mousedown(btn, pos):
             if cat_tab_rects and i < len(cat_tab_rects) and cat_tab_rects[i].collidepoint(pos):
                 if cat != current_category:
                     current_category = cat
-                    elements = _saved_elements[current_category]
                     wire_points.clear()
                     mode = 'select'
                     selected = None
@@ -2143,7 +2408,7 @@ def handle_mousedown(btn, pos):
             close_context_menu()
         if mode == 'add_wire':
             wx, wy = screen_to_world(pos[0], pos[1])
-            wx, wy = snap_to_terminal(wx, wy, elements)
+            wx, wy = snap_to_terminal(wx, wy, elements, wire_points)
             if wire_points:
                 lx, ly = wire_points[-1]
                 wx, wy = ortho_snap(lx, ly, wx, wy)
@@ -2178,17 +2443,11 @@ def handle_mousedown(btn, pos):
             if selected:
                 selected.is_selected = False
                 selected = None
-            # Left-drag on empty canvas = pan (not when global panel is open)
-            if not global_panel_open:
-                panning = True
-                pan_start_mouse = pos
-                pan_start_camera = dict(camera)
+            # Left-drag on empty canvas — no panning (camera locked to center)
+            pass
 
-    elif btn == 2:  # Middle click — pan
-        if not global_panel_open:
-            panning = True
-            pan_start_mouse = pos
-            pan_start_camera = dict(camera)
+    elif btn == 2:  # Middle click — no panning (camera locked to center)
+        pass
 
     elif btn == 3:  # Right click
         if mode == 'add_wire':
@@ -2272,18 +2531,7 @@ def handle_mousemotion(pos, rel):
     if measuring:
         _update_measurement(pos)
 
-    if panning:
-        dx = pos[0] - pan_start_mouse[0]
-        dy = pos[1] - pan_start_mouse[1]
-        angle = camera.get('angle', 0.0)
-        if angle != 0:
-            cos_a = math.cos(angle)
-            sin_a = math.sin(angle)
-            # rotate mouse delta by -angle so pan direction matches view
-            dx, dy = dx * cos_a + dy * sin_a, -dx * sin_a + dy * cos_a
-        camera['x'] = pan_start_camera['x'] - dx / camera['zoom']
-        camera['y'] = pan_start_camera['y'] - dy / camera['zoom']
-        return
+    # Panning removed — camera is locked to center
 
     # Right-click resize drag (RectField / CircField)
     if _resize_target and _resize_start_mouse:
@@ -2306,7 +2554,7 @@ def handle_mousemotion(pos, rel):
 
 
 def handle_mouseup(btn, pos):
-    global dragging, panning, _resize_target, _resize_handle, _resize_start_mouse, _resize_start_vals, _scrub_target
+    global dragging, _resize_target, _resize_handle, _resize_start_mouse, _resize_start_vals, _scrub_target
 
     if btn == 1:
         if _scrub_target:
@@ -2317,9 +2565,6 @@ def handle_mouseup(btn, pos):
         dragging = False
         drag_start_mouse = None
         drag_start_pos = None
-        panning = False
-    elif btn == 2:
-        panning = False
     elif btn == 3:
         if _resize_target:
             field_system.mark_dirty()
@@ -2387,17 +2632,316 @@ def handle_keydown(key):
 # Study mode helpers
 # ---------------------------------------------------------------------------
 
+def _save_study_file(path):
+    """Save current elements to a study .txt file."""
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1\n')
+            f.write(f'# CATEGORY | {current_category}\n')
+            f.write(f'# CAMERA | 0.0 | 0.0 | {camera["zoom"]}\n')
+            f.write(f'# FARADAY | {int(faraday_active)}\n')
+            for e in elements:
+                if isinstance(e, Charge):
+                    f.write(f'CHARGE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.q}\n')
+                elif isinstance(e, Magnet):
+                    f.write(f'MAGNET | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.strength} | {math.degrees(e.angle):.1f} | {e.length} | {e.height}\n')
+                elif isinstance(e, HorseshoeMagnet):
+                    f.write(f'HORSESHOE_MAGNET | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.strength} | {math.degrees(e.angle):.1f} | {e.gap} | {e.arm_length} | {e.thickness}\n')
+                elif isinstance(e, Wire):
+                    pts = ';'.join(f'{p[0]:.1f},{p[1]:.1f}' for p in e.points)
+                    f.write(f'WIRE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.current} | {int(e.auto_current)} | {e.vx} | {e.vy} | {pts}\n')
+                elif isinstance(e, Power):
+                    f.write(f'POWER | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.ptype} | {e.value} | {math.degrees(e.angle):.1f} | {e.mode} | {int(e.switched_on)} | {e.frequency}\n')
+                elif isinstance(e, Resistor):
+                    f.write(f'RESISTOR | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.resistance} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, Capacitor):
+                    f.write(f'CAPACITOR | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.capacitance} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, Inductor):
+                    f.write(f'INDUCTOR | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.inductance} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, Ammeter):
+                    f.write(f'AMMETER | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, Solenoid):
+                    f.write(f'SOLENOID | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.coil_length} | {e.coil_radius} | {e.turns} | {math.degrees(e.angle):.1f} | {int(e.winding_clockwise)}\n')
+                elif isinstance(e, TextBox):
+                    safe_text = e.text.replace('|', '｜').replace('\n', '¶')
+                    f.write(f'TEXTBOX | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {safe_text} | {e.box_width} | {e.box_height} | {e.font_size}\n')
+                elif isinstance(e, Voltmeter):
+                    f.write(f'VOLTMETER | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, MetalBall):
+                    f.write(f'METAL_BALL | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.r_outer} | {e.r_inner}\n')
+                elif isinstance(e, MetalShell):
+                    f.write(f'METAL_SHELL | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.inner_radius} | {e.thickness}\n')
+                elif isinstance(e, MetalPlate):
+                    f.write(f'METAL_PLATE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.thickness} | {math.degrees(e.angle):.1f}\n')
+                elif isinstance(e, MotionCharge):
+                    f.write(f'MOTION_CHARGE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.q} | {e.mass} | {e.vx} | {e.vy} | {int(e.fixed)}\n')
+                elif isinstance(e, RectField):
+                    f.write(f'RECT_FIELD | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.width:.1f} | {e.height:.1f} | {e.B_mag} | {e.direction}\n')
+                elif isinstance(e, CircField):
+                    f.write(f'CIRC_FIELD | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.radius:.1f} | {e.B_mag} | {e.direction}\n')
+                elif isinstance(e, RectEfield):
+                    f.write(f'RECT_EFIELD | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.width:.1f} | {e.height:.1f} | {e.E_mag} | {e.direction}\n')
+        print(f"Study saved to {path}")
+    except Exception as ex:
+        print(f"Save study file error: {ex}")
+
+
+def _save_current_study():
+    """Save current study project if in study mode."""
+    if not study_mode or not study_projects or study_project_index >= len(study_projects):
+        return
+    path = study_projects[study_project_index]
+    if path.endswith('.txt'):
+        _save_study_file(path)
+
+
 def load_study_project(index):
     """Load a study project by its index in the study_projects list."""
     global study_project_index, study_project_name, elements, current_category
     global mode, selected, editing_element, cap_voltages, ind_currents, sim_time
     global faraday_active, faraday_time, wire_points, simulation_playing
     global circuit_errors, _edit_buttons, context_menu, canvas_menu, measuring
+    global _flux_history, _induced_display
 
     if index < 0 or index >= len(study_projects):
         return False
 
+    _undo_stack.clear()
+    _flux_history.clear()
+    _induced_display.clear()
+
     path = study_projects[index]
+    study_project_index = index
+
+    if path.endswith('.txt'):
+        # Parse .txt save file format
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as ex:
+            print(f"Load study project error: {ex}")
+            return False
+
+        cat = 'electrostatic'
+        new_elements = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                if line.startswith('# CATEGORY'):
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        cat = parts[1].strip()
+                continue
+            parts = [p.strip() for p in line.split('|')]
+            if not parts:
+                continue
+            etype = parts[0]
+            try:
+                if etype == 'CHARGE' and len(parts) >= 6:
+                    x, y = float(parts[2]), float(parts[3])
+                    q = float(parts[5])
+                    if abs(q) > 1e-3:
+                        q *= 1e-6
+                    c = Charge(x, y, q=q)
+                    if len(parts) >= 5:
+                        rgb = parts[4].split(',')
+                        if len(rgb) == 3:
+                            c.color = tuple(int(v) for v in rgb)
+                    new_elements.append(c)
+                elif etype == 'MAGNET' and len(parts) >= 8:
+                    x, y = float(parts[2]), float(parts[3])
+                    strength = float(parts[5])
+                    angle = math.radians(float(parts[6]))
+                    length = float(parts[7]) if len(parts) >= 8 else 100
+                    height = float(parts[8]) if len(parts) >= 9 else 32
+                    m = Magnet(x, y, strength=strength, angle=angle, length=length, height=height)
+                    new_elements.append(m)
+                elif etype == 'HORSESHOE_MAGNET' and len(parts) >= 8:
+                    x, y = float(parts[2]), float(parts[3])
+                    strength = float(parts[5])
+                    angle = math.radians(float(parts[6]))
+                    gap = float(parts[7]) if len(parts) >= 8 else 50
+                    arm_length = float(parts[8]) if len(parts) >= 9 else 80
+                    thickness = float(parts[9]) if len(parts) >= 10 else 20
+                    hm = HorseshoeMagnet(x, y, strength=strength, angle=angle, gap=gap, arm_length=arm_length, thickness=thickness)
+                    new_elements.append(hm)
+                elif etype == 'WIRE' and len(parts) >= 7:
+                    current = float(parts[5])
+                    auto = True
+                    vx = 0.0
+                    vy = 0.0
+                    if len(parts) >= 10:
+                        # New format: has vx/vy
+                        auto = bool(int(parts[6]))
+                        vx = float(parts[7])
+                        vy = float(parts[8])
+                        pts_str = parts[9]
+                    elif len(parts) >= 8:
+                        auto = bool(int(parts[6]))
+                        pts_str = parts[7]
+                    else:
+                        pts_str = parts[6]
+                    points = []
+                    for pair in pts_str.split(';'):
+                        xy = pair.split(',')
+                        if len(xy) == 2:
+                            points.append((float(xy[0]), float(xy[1])))
+                    if len(points) >= 2:
+                        w = Wire(points, current=current)
+                        w.auto_current = auto
+                        w.vx = vx
+                        w.vy = vy
+                        new_elements.append(w)
+                elif etype == 'POWER' and len(parts) >= 8:
+                    x, y = float(parts[2]), float(parts[3])
+                    ptype = parts[5]
+                    value = float(parts[6])
+                    angle = math.radians(float(parts[7]))
+                    mode = parts[8] if len(parts) >= 9 else 'DC'
+                    frequency = float(parts[10]) if len(parts) >= 11 else 50.0
+                    p = Power(x, y, ptype=ptype, value=value, angle=angle, mode=mode, frequency=frequency)
+                    p.switched_on = bool(int(parts[9])) if len(parts) >= 10 else True
+                    new_elements.append(p)
+                elif etype == 'RESISTOR' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    res = float(parts[5])
+                    angle = math.radians(float(parts[6]))
+                    new_elements.append(Resistor(x, y, resistance=res, angle=angle))
+                elif etype == 'CAPACITOR' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    cap = float(parts[5])
+                    angle = math.radians(float(parts[6]))
+                    new_elements.append(Capacitor(x, y, capacitance=cap, angle=angle))
+                elif etype == 'INDUCTOR' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    ind = float(parts[5])
+                    angle = math.radians(float(parts[6]))
+                    new_elements.append(Inductor(x, y, inductance=ind, angle=angle))
+                elif etype == 'AMMETER' and len(parts) >= 6:
+                    x, y = float(parts[2]), float(parts[3])
+                    angle = math.radians(float(parts[5])) if len(parts) >= 6 else 0.0
+                    new_elements.append(Ammeter(x, y, angle=angle))
+                elif etype == 'SOLENOID' and len(parts) >= 9:
+                    x, y = float(parts[2]), float(parts[3])
+                    coil_length = float(parts[5])
+                    coil_radius = float(parts[6])
+                    turns = int(parts[7])
+                    angle = math.radians(float(parts[8])) if len(parts) >= 9 else 0.0
+                    s = Solenoid(x, y, coil_length=coil_length, coil_radius=coil_radius, turns=turns, angle=angle)
+                    if len(parts) >= 10:
+                        s.winding_clockwise = bool(int(parts[9]))
+                    new_elements.append(s)
+                elif etype == 'TEXTBOX' and len(parts) >= 8:
+                    x, y = float(parts[2]), float(parts[3])
+                    text = parts[5] if len(parts) >= 6 else '备注'
+                    text = text.replace('¶', '\n').replace('｜', '|')
+                    box_w = float(parts[6]) if len(parts) >= 7 else 160
+                    box_h = float(parts[7]) if len(parts) >= 8 else 60
+                    fs = int(float(parts[8])) if len(parts) >= 9 else 18
+                    new_elements.append(TextBox(x, y, text=text, box_width=box_w, box_height=box_h, font_size=fs))
+                elif etype == 'VOLTMETER' and len(parts) >= 6:
+                    x, y = float(parts[2]), float(parts[3])
+                    angle = math.radians(float(parts[5])) if len(parts) >= 6 else 0.0
+                    new_elements.append(Voltmeter(x, y, angle=angle))
+                elif etype == 'METAL_BALL' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    r_outer = float(parts[5])
+                    r_inner = float(parts[6]) if len(parts) >= 7 else 0
+                    new_elements.append(MetalBall(x, y, r_outer=r_outer, r_inner=r_inner))
+                elif etype == 'METAL_SHELL' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    inner_radius = float(parts[5])
+                    thickness = float(parts[6])
+                    new_elements.append(MetalShell(x, y, inner_radius=inner_radius, thickness=thickness))
+                elif etype == 'METAL_PLATE' and len(parts) >= 7:
+                    x, y = float(parts[2]), float(parts[3])
+                    if len(parts) >= 8 and parts[7] in ('0', '1'):
+                        pw = float(parts[5])
+                        ph = float(parts[6])
+                        new_elements.append(MetalPlate(x, y, thickness=ph))
+                    elif len(parts) >= 8:
+                        new_elements.append(MetalPlate(x, y, thickness=float(parts[5]),
+                                                       angle=math.radians(float(parts[6]))))
+                    else:
+                        new_elements.append(MetalPlate(x, y, thickness=float(parts[5]),
+                                                       angle=math.radians(float(parts[6]))))
+                elif etype == 'MOTION_CHARGE' and len(parts) >= 10:
+                    x, y = float(parts[2]), float(parts[3])
+                    q = float(parts[5])
+                    mass = float(parts[6])
+                    vx = float(parts[7])
+                    vy = float(parts[8])
+                    if abs(q) > 1e-3:
+                        q *= 1e-6
+                    if mass > 0.1:
+                        mass *= 0.001
+                    mc = MotionCharge(x, y, q=q, mass=mass, vx=vx, vy=vy)
+                    if len(parts) >= 10:
+                        mc.fixed = bool(int(parts[9]))
+                    new_elements.append(mc)
+                elif etype == 'RECT_FIELD' and len(parts) >= 9:
+                    x, y = float(parts[2]), float(parts[3])
+                    width = float(parts[5])
+                    height = float(parts[6])
+                    B_mag = float(parts[7])
+                    raw_dir = parts[8].strip().lower()
+                    if raw_dir in ('into', 'in'):
+                        direction = -1
+                    elif raw_dir in ('out', 'out of page'):
+                        direction = 1
+                    else:
+                        direction = int(parts[8]) if len(parts) >= 9 else 1
+                    new_elements.append(RectField(x, y, width=width, height=height, B_mag=B_mag, direction=direction))
+                elif etype == 'CIRC_FIELD' and len(parts) >= 8:
+                    x, y = float(parts[2]), float(parts[3])
+                    radius = float(parts[5])
+                    B_mag = float(parts[6])
+                    direction = int(parts[7]) if len(parts) >= 8 else 1
+                    new_elements.append(CircField(x, y, radius=radius, B_mag=B_mag, direction=direction))
+                elif etype == 'RECT_EFIELD' and len(parts) >= 9:
+                    x, y = float(parts[2]), float(parts[3])
+                    width = float(parts[5])
+                    height = float(parts[6])
+                    E_mag = float(parts[7])
+                    direction = int(parts[8]) if len(parts) >= 9 else 1
+                    new_elements.append(RectEfield(x, y, width=width, height=height, E_mag=E_mag, direction=direction))
+            except (ValueError, IndexError) as ex:
+                print(f"Skipping bad line in study file: {line} — {ex}")
+
+        # Derive name from filename (e.g. "1. 磁铁插入线圈.txt" → "磁铁插入线圈")
+        base = os.path.splitext(os.path.basename(path))[0]
+        name = base.split('.', 1)[-1].strip() if '.' in base else base
+        study_project_name = name
+
+        # Reset state and load elements directly
+        simulation_playing = False
+        faraday_active = False
+        faraday_time = 0.0
+        cap_voltages = {}
+        ind_currents = {}
+        sim_time = 0.0
+        mode = 'select'
+        selected = None
+        editing_element = None
+        context_menu = None
+        canvas_menu = None
+        measuring = False
+        _edit_buttons.clear()
+        wire_points.clear()
+        circuit_errors.clear()
+
+        current_category = cat
+        elements[:] = new_elements
+        camera['x'] = camera['y'] = 0.0
+        camera['zoom'] = 1.0
+        camera['angle'] = 0.0
+        tool_rects.clear()
+        tool_rects.extend(get_tool_rects())
+        field_system.mark_dirty()
+        solve_and_update()
+        return True
+
+    # .json path (existing logic)
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -2406,7 +2950,6 @@ def load_study_project(index):
         return False
 
     study_project_name = data.get('name', '未命名')
-    study_project_index = index
 
     # Reset all simulation state
     simulation_playing = False
@@ -2427,8 +2970,7 @@ def load_study_project(index):
 
     cat = data.get('category', 'electrostatic')
     current_category = cat
-    _saved_elements[cat] = _deserialize_elements(data.get('elements', []))
-    elements = _saved_elements[cat]
+    elements[:] = _deserialize_elements(data.get('elements', []))
 
     # Reset camera
     camera['x'] = camera['y'] = 0.0
@@ -2445,14 +2987,14 @@ def load_study_project(index):
 
 
 def scan_study_projects():
-    """Scan the study/ directory for numbered JSON project files."""
+    """Scan the study/ directory for numbered JSON/TXT project files."""
     global study_projects
     study_projects = []
     if not os.path.isdir(STUDY_DIR):
         return
     try:
         files = [f for f in os.listdir(STUDY_DIR)
-                 if f.endswith('.json') and f[0].isdigit()]
+                 if f[0].isdigit() and (f.endswith('.json') or f.endswith('.txt'))]
         files.sort(key=lambda x: int(x.split('.')[0]) if x[0].isdigit() else 999)
         study_projects = [os.path.join(STUDY_DIR, f) for f in files]
     except Exception as ex:
@@ -2531,7 +3073,7 @@ def run_study_end_screen(screen):
 
 def handle_top_action(action):
     global mode, elements, selected, simulation_playing, faraday_time, faraday_active
-    global sim_time, cap_voltages, ind_currents, running, _exit_to_home
+    global sim_time, cap_voltages, ind_currents, running, _exit_to_home, _flux_history
     if action == 'new':
         _save_undo_snapshot()
         simulation_playing = False
@@ -2539,9 +3081,9 @@ def handle_top_action(action):
         faraday_time = 0.0
         cap_voltages = {}
         ind_currents = {}
+        _flux_history.clear()
         sim_time = 0.0
-        _saved_elements[current_category].clear()
-        elements = _saved_elements[current_category]
+        elements.clear()
         selected = None
         camera['x'] = camera['y'] = 0.0
         camera['zoom'] = 1.0
@@ -2558,6 +3100,7 @@ def handle_top_action(action):
             # Reset transient circuit state
             cap_voltages = {}
             ind_currents = {}
+            _flux_history.clear()
             sim_time = 0.0
             for e in elements:
                 if isinstance(e, Capacitor):
@@ -2573,6 +3116,7 @@ def handle_top_action(action):
     elif action == 'revert':
         _do_revert()
     elif action == 'exit':
+        _save_current_study()
         if study_mode:
             _exit_to_home = True
         else:
@@ -2580,6 +3124,7 @@ def handle_top_action(action):
         running = False
     elif action == 'study_next':
         if study_mode:
+            _save_current_study()
             next_idx = study_project_index + 1
             if next_idx < len(study_projects):
                 load_study_project(next_idx)
@@ -2847,7 +3392,7 @@ def _save_file():
         with open(path, 'w', encoding='utf-8') as f:
             f.write('# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1\n')
             f.write(f'# CATEGORY | {current_category}\n')
-            f.write(f'# CAMERA | {camera["x"]} | {camera["y"]} | {camera["zoom"]}\n')
+            f.write(f'# CAMERA | 0.0 | 0.0 | {camera["zoom"]}\n')
             f.write(f'# FARADAY | {int(faraday_active)}\n')
             for e in elements:
                 if isinstance(e, Charge):
@@ -2858,7 +3403,7 @@ def _save_file():
                     f.write(f'HORSESHOE_MAGNET | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.strength} | {math.degrees(e.angle):.1f} | {e.gap} | {e.arm_length} | {e.thickness}\n')
                 elif isinstance(e, Wire):
                     pts = ';'.join(f'{p[0]:.1f},{p[1]:.1f}' for p in e.points)
-                    f.write(f'WIRE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.current} | {int(e.auto_current)} | {pts}\n')
+                    f.write(f'WIRE | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.current} | {int(e.auto_current)} | {e.vx} | {e.vy} | {pts}\n')
                 elif isinstance(e, Power):
                     f.write(f'POWER | {e.id} | {e.x:.1f} | {e.y:.1f} | {e.color[0]},{e.color[1]},{e.color[2]} | {e.ptype} | {e.value} | {math.degrees(e.angle):.1f} | {e.mode} | {int(e.switched_on)} | {e.frequency}\n')
                 elif isinstance(e, Resistor):
@@ -2928,8 +3473,7 @@ def _open_file():
                 parts = line.split('|')
                 if len(parts) >= 4:
                     try:
-                        camera['x'] = float(parts[1].strip())
-                        camera['y'] = float(parts[2].strip())
+                        # camera x,y locked to 0,0 — only restore zoom
                         camera['zoom'] = float(parts[3].strip())
                     except ValueError:
                         pass
@@ -3088,7 +3632,13 @@ def _open_file():
                 width = float(parts[5])
                 height = float(parts[6])
                 B_mag = float(parts[7])
-                direction = int(parts[8]) if len(parts) >= 9 else 1
+                raw_dir = parts[8].strip().lower()
+                if raw_dir in ('into', 'in'):
+                    direction = -1
+                elif raw_dir in ('out', 'out of page'):
+                    direction = 1
+                else:
+                    direction = int(parts[8]) if len(parts) >= 9 else 1
                 new_elements.append(RectField(x, y, width=width, height=height,
                                               B_mag=B_mag, direction=direction))
             elif etype == 'CIRC_FIELD' and len(parts) >= 8:
@@ -3110,8 +3660,8 @@ def _open_file():
 
     for e in elements:
         e.is_selected = False
-    # Store loaded elements into the file's category
-    _saved_elements[cat] = new_elements
+    # Load elements into the shared list
+    elements[:] = new_elements
     # Switch to that category
     global current_category, cap_voltages, ind_currents, sim_time
     cap_voltages = {}
@@ -3121,7 +3671,6 @@ def _open_file():
         current_category = cat
         tool_rects.clear()
         tool_rects.extend(get_tool_rects())
-    elements = _saved_elements[cat]
     selected = None
     field_system.mark_dirty()
     solve_and_update()
@@ -3360,14 +3909,57 @@ def main():
 
             # --- Physics update ---
             dt = 1.0 / 60
-            for e in elements:
-                if isinstance(e, Wire):
-                    e.update_particles(dt)
+
+            if simulation_playing:
+                global sim_time, cap_voltages, ind_currents
+                sim_dt = dt * sim_speed
+                # Wire particle animation (charge dots along the wire)
+                for e in elements:
+                    if isinstance(e, Wire):
+                        e.update_particles(dt)
+                # Auto-movement for wires with vx/vy set (respects sim_speed)
+                for e2 in elements:
+                    if isinstance(e2, Wire) and (e2.vx != 0.0 or e2.vy != 0.0):
+                        e2.move_by(e2.vx * sim_dt, e2.vy * sim_dt)
+                        field_system.mark_dirty()
+
+            # ── Faraday induction (every frame — captures dragged wires + circuit currents) ──
+            # Reset auto wire currents before induction (only during play, since
+            # circuit solver runs after and restores correct values).
+            if simulation_playing:
+                for e in elements:
+                    if isinstance(e, Wire) and e.auto_current:
+                        e.current = 0.0
+            loops = _find_wire_loops(elements)
+            induced = _compute_induced_emfs(elements, loops, field_system, dt, faraday_time)
+            _apply_loop_currents(induced, elements)
+
+            # Update display info for induced EMF/current labels
+            _induced_display.clear()
+            for key, val in list(induced.items()):
+                if isinstance(key, tuple) and key[0] == 'loop_current':
+                    pts, I_ind, wire_elems = val
+                    cx = sum(p[0] for p in pts) / len(pts)
+                    cy = sum(p[1] for p in pts) / len(pts)
+                    total_R = 0.0
+                    for w in wire_elems:
+                        if hasattr(w, 'resistance'):
+                            total_R += w.resistance
+                        else:
+                            seg_len = 0.0
+                            for i in range(len(w.points) - 1):
+                                seg_len += math.hypot(w.points[i+1][0] - w.points[i][0],
+                                                      w.points[i+1][1] - w.points[i][1])
+                            total_R += 0.01 / max(1, len(w.points) - 1) * seg_len
+                    emf = I_ind * total_R if total_R > 0 else 0.0
+                    _induced_display.append((cx, cy, emf, I_ind, total_R))
 
             if simulation_playing:
                 global sim_time, cap_voltages, ind_currents
                 sim_dt = dt * sim_speed
                 pure_ac, ac_freq = _is_pure_ac_circuit()
+                induced_voltages = {e: v for e, v in induced.items()
+                                    if isinstance(e, Solenoid)}
                 if pure_ac:
                     currents, node_v, circuit_errors = solve_ac(elements, frequency=ac_freq)
                     sim_time += sim_dt
@@ -3385,11 +3977,13 @@ def main():
                 else:
                     n_sub = max(1, min(50, int(sim_dt / 0.002)))
                     sub_dt = sim_dt / n_sub
+
                     for _ in range(n_sub):
                         sim_time += sub_dt
                         currents, circuit_errors, cap_voltages, ind_currents = solve_circuit(
                             elements, dt=sub_dt, time=sim_time,
-                            cap_voltages=cap_voltages, ind_currents=ind_currents)
+                            cap_voltages=cap_voltages, ind_currents=ind_currents,
+                            induced_voltages=induced_voltages)
                         _update_meter_peaks(currents)
                     for e in elements:
                         if isinstance(e, Wire) and e.auto_current:

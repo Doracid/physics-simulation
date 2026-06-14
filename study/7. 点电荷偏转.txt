@@ -1,0 +1,7 @@
+# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
+# CATEGORY | electrostatic
+# CAMERA | 0.0 | 0.0 | 1.0
+# FARADAY | 0
+TEXTBOX | 19 | -311.6 | -238.1 | 224,224,240 | 带电粒子在点电荷场中偏转——抛物线轨迹¶按“播放”键启动演示 | 440.0 | 100.0 | 16
+CHARGE | 20 | 45.5 | -52.7 | 255,60,60 | 2e-07
+MOTION_CHARGE | 21 | -272.2 | 15.3 | 0,255,128 | 1e-06 | 0.001 | 500.0 | 0.0 | 0

@@ -1,9 +1,0 @@
-{
-  "name": "3. 平行板电容器",
-  "category": "electrostatic",
-  "description": "观察平行板电容器内部的匀强电场。两板带等量异种电荷，中间形成近似均匀的电场。",
-  "elements": [
-    {"type": "MetalPlate", "x": -20, "y": -120, "thickness": 10, "angle": 0},
-    {"type": "MetalPlate", "x": -20, "y": 120, "thickness": 10, "angle": 0}
-  ]
-}

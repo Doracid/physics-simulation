@@ -697,6 +697,9 @@ class Wire(Element):
         self.current = float(current)
         self.auto_current = True
         self.is_ac = False
+        self.vx = 0.0  # auto-movement velocity (px/s)
+        self.vy = 0.0
+        self._speed = 2.5  # particle animation speed multiplier
         self._particles = []
     # ── particle helpers ───────────────────────────────────────────
 
@@ -722,7 +725,7 @@ class Wire(Element):
         total = self._total_length()
         if total <= 0 or not self._particles:
             return
-        speed = abs(self.current) * 2.5 * dt
+        speed = abs(self.current) * self._speed * dt
         direction = 1 if self.current >= 0 else -1
         for p in self._particles:
             p['dist'] += direction * speed
@@ -1041,8 +1044,9 @@ class Power(ActiveElement):
             surf.blit(plus, plus.get_rect(center=(cx - r // 2, cy)))
             surf.blit(minus, minus.get_rect(center=(cx + r // 2, cy)))
         else:
-            tilde = f_sym.render("~", True, (255, 255, 100))
-            surf.blit(tilde, tilde.get_rect(center=(cx, cy)))
+            f_tilde = get_element_font(int(sym_size * 1.4), bold=True)
+            tilde = f_tilde.render("~", True, (255, 255, 100))
+            surf.blit(tilde, tilde.get_rect(center=(cx, cy + sym_size // 2)))
 
         # ── Switch button (top of the circle) ──────────────────────
         scx, scy, sr = self._switch_center(w, h)

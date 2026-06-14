@@ -13,6 +13,11 @@ EPSILON_SOFT = 0.075
 MU_0_4PI = 1e-7              # μ₀/(4π) in T·m/A  (wire B-field)
 MAGNET_K = 2e4               # visual-scale magnet constant (kept for display)
 
+# Flux scaling: converts display B-field (from magnet model) to Teslas.
+# MAGNET_K = 2e4 and typical distances of ~200 px produce display B ~10² units.
+# A bar magnet of ~0.1 T at ~0.5 m → 1e-4 gives physically plausible flux.
+BX_TO_TESLA = 1e-4
+
 
 class FieldSystem:
     """Handles field computation and field-line tracing."""
@@ -767,6 +772,9 @@ class FieldSystem:
                     dx, dy = qx - cx, qy - cy
                     d = math.hypot(dx, dy)
 
+                    if d < 1e-9:
+                        continue
+
                     if d > r_out:
                         q_img = -q * r_out / d
                         scale = r_out * r_out / (d * d)
@@ -1146,6 +1154,151 @@ class FieldSystem:
                 if wires or resistors:
                     self._draw_wire_bfield_grid(surface, camera, screen_size, elements,
                                                  wires, resistors)
+
+    # ── Flux computation (Faraday's law) ─────────────────────────────
+
+    def _magnet_bz_at(self, x, y, elements, faraday_time=None):
+        """Effective Bz from magnets for flux-through-loop computation.
+
+        In 2D, magnet dipoles are in-plane → real Bz = 0 at z = 0.
+        For educational induction we add a pseudo-Bz that mimics
+        the 3D flux a moving magnet would create through a planar loop.
+        Uses MAGNET_K scale to match the in-plane B magnitude.
+        """
+        Bz = 0.0
+        for e in elements:
+            cname = e.__class__.__name__
+            if cname not in ('Magnet', 'HorseshoeMagnet'):
+                continue
+            strength = getattr(e, 'strength', 1.0)
+            dx = x - e.x
+            dy = y - e.y
+            r2 = dx*dx + dy*dy + 25.0
+            r = math.sqrt(r2)
+            # Pseudo-Bz amplitude using MAGNET_K for display-scale consistency
+            # falls off as 1/r² (3D dipole perpendicular component)
+            amp = MAGNET_K * strength / r2
+            if faraday_time is not None:
+                omega = 2 * math.pi * 1.5
+                Bz += amp * math.sin(omega * faraday_time)
+            else:
+                Bz += amp
+        return Bz * BX_TO_TESLA
+
+    def compute_solenoid_flux(self, solenoid, elements):
+        """Magnetic flux through solenoid cross-section from EXTERNAL sources.
+
+        Returns flux in Weber (T·m²).  Excludes the solenoid's own field
+        so that L·dI/dt can be handled separately by the circuit solver.
+        """
+        cos_a = math.cos(solenoid.angle)
+        sin_a = math.sin(solenoid.angle)
+        R = solenoid.coil_radius
+
+        # External sources only — exclude this solenoid's own B-field
+        mags = [e for e in elements
+                if e.__class__.__name__ in ('Magnet', 'HorseshoeMagnet')]
+        sols = [e for e in elements
+                if e.__class__.__name__ == 'Solenoid' and e is not solenoid]
+        Bx, By = self._bfield(solenoid.x, solenoid.y, elements,
+                               magnet_elems=mags, solenoid_elems=sols)
+
+        # Component of B parallel to solenoid axis (in Tesla)
+        B_parallel = (Bx * cos_a + By * sin_a) * BX_TO_TESLA
+
+        # Cross-sectional area in m²
+        A_m2 = math.pi * (R / PX_PER_METER) ** 2
+
+        return B_parallel * A_m2
+
+    @staticmethod
+    def compute_polygon_area(points):
+        """Signed area (px²) of a closed polygon via shoelace formula."""
+        n = len(points)
+        if n < 3:
+            return 0.0
+        area = 0.0
+        for i in range(n):
+            x1, y1 = points[i]
+            x2, y2 = points[(i + 1) % n]
+            area += x1 * y2 - x2 * y1
+        return area / 2.0
+
+    @staticmethod
+    def _clip_polygon_by_halfplane(poly, a, b, c):
+        """Clip polygon to half-plane a*x + b*y + c >= 0. Sutherland-Hodgman."""
+        if not poly:
+            return []
+        out = []
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            d1 = a * x1 + b * y1 + c
+            d2 = a * x2 + b * y2 + c
+            if d1 >= 0:
+                out.append((x1, y1))
+            if (d1 >= 0) != (d2 >= 0):
+                t = d1 / (d1 - d2)
+                out.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+        return out
+
+    def compute_loop_flux(self, points, elements, faraday_time=None):
+        """Magnetic flux from Bz through a closed polygon (Weber).
+
+        For uniform bounded fields (RectField), uses analytic polygon clipping
+        for smooth flux changes.  Wires and magnets use centroid approximation.
+        """
+        area_px2 = abs(self.compute_polygon_area(points))
+        if area_px2 < 1.0:
+            return 0.0
+
+        # ── 1. Bounded fields: analytic clip area × Bz ──
+        flux = 0.0
+        for e in elements:
+            cname = e.__class__.__name__
+            Bz = 0.0
+            clip = points[:]
+            if cname == 'RectField':
+                hw = e.width / 2
+                hh = e.height / 2
+                x0, y0 = e.x - hw, e.y - hh
+                x1, y1 = e.x + hw, e.y + hh
+                # Clip to four half-planes
+                for a, b, c in [(1, 0, -x0), (-1, 0, x1), (0, 1, -y0), (0, -1, y1)]:
+                    clip = self._clip_polygon_by_halfplane(clip, a, b, c)
+                    if not clip:
+                        break
+                Bz = e.B_mag * e.direction * BX_TO_TESLA
+            elif cname == 'CircField':
+                # Approximate with centroid-based overlap test
+                cx = sum(p[0] for p in points) / len(points)
+                cy = sum(p[1] for p in points) / len(points)
+                dx = cx - e.x
+                dy = cy - e.y
+                if dx*dx + dy*dy <= e.radius * e.radius:
+                    clip = points  # use whole loop area
+                    Bz = e.B_mag * e.direction * BX_TO_TESLA
+                else:
+                    clip = []
+                    Bz = 0.0
+
+            if Bz != 0.0 and clip:
+                clip_area = abs(self.compute_polygon_area(clip))
+                A_m2 = clip_area / (PX_PER_METER ** 2)
+                flux += Bz * A_m2
+
+        # ── 2. Wires and magnets: centroid Bz × total area ──
+        n = len(points)
+        cx = sum(p[0] for p in points) / n
+        cy = sum(p[1] for p in points) / n
+        Bz_other = (self._wire_bfield_at(cx, cy, elements) +
+                    self._magnet_bz_at(cx, cy, elements, faraday_time))
+        if Bz_other != 0.0:
+            A_m2 = area_px2 / (PX_PER_METER ** 2)
+            flux += Bz_other * A_m2
+
+        return flux
 
     # ── Faraday's law: induced E-field ──────────────────────────────
 

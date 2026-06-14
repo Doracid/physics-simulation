@@ -1,0 +1,6 @@
+# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
+# CATEGORY | electrostatic
+# CAMERA | 0.0 | 0.0 | 1.0
+# FARADAY | 0
+TEXTBOX | 1 | -415.0 | -352.0 | 224,224,240 | 单个点电荷——辐射状电场线，同心圆等势面 | 450.0 | 40.0 | 16
+CHARGE | 2 | 0.0 | 0.0 | 255,50,50 | 3e-06

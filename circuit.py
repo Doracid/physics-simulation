@@ -10,13 +10,18 @@ CAP_R = 1e9          # capacitor = open in DC
 GND_R = 1e7          # bleed resistor to ground for numerical stability
 
 
-def solve_circuit(elements, dt=None, time=0.0, cap_voltages=None, ind_currents=None):
+def solve_circuit(elements, dt=None, time=0.0, cap_voltages=None, ind_currents=None,
+                  induced_voltages=None):
     """Solve circuit using Modified Nodal Analysis.
 
     When dt > 0, performs transient analysis:
     - Capacitors use companion model (G = C/dt, I_eq = G * V_prev)
     - Inductors use companion model (G = dt/L, I_eq = I_prev)
     - AC sources use time-varying value
+
+    induced_voltages : dict or None
+        Map {element: volts} for externally-induced EMF (Faraday's law).
+        Affects Solenoid elements stamped as Norton equivalent current sources.
 
     Returns (currents_dict, errors_list, cap_voltages, ind_currents).
     cap_voltages/ind_currents are dicts mapping element → float, updated in place.
@@ -154,8 +159,11 @@ def solve_circuit(elements, dt=None, time=0.0, cap_voltages=None, ind_currents=N
                 else:
                     branches.append((ni, nj, 1.0 / CAP_R, 0.0, e, 0))
             elif isinstance(e, Solenoid):
-                # DC: solenoid behaves as a pure resistor
-                branches.append((ni, nj, 1.0 / e.resistance, 0.0, e, 0))
+                # Solenoid: resistor + induced EMF (Faraday's law)
+                R = e.resistance
+                induced_V = induced_voltages.get(e, 0.0) if induced_voltages else 0.0
+                I_N = induced_V / R  # Norton equivalent current source
+                branches.append((ni, nj, 1.0 / R, I_N, e, 0))
             elif isinstance(e, Power):
                 if not e.switched_on:
                     continue  # switched off = open circuit

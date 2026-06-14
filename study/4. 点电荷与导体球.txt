@@ -1,0 +1,7 @@
+# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
+# CATEGORY | electrostatic
+# CAMERA | 0.0 | 0.0 | 1.0
+# FARADAY | 0
+TEXTBOX | 9 | -389.0 | -355.0 | 224,224,240 | 点电荷与孤立导体球——观察感应电荷分布及电场线弯曲 | 500.0 | 40.0 | 16
+CHARGE | 10 | -163.7 | -2.4 | 255,50,50 | 3e-06
+METAL_BALL | 11 | 293.1 | -13.6 | 200,202,204 | 250.0 | 0.0

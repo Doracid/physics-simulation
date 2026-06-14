@@ -1,0 +1,7 @@
+# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
+# CATEGORY | electrostatic
+# CAMERA | 0.0 | 0.0 | 1.0
+# FARADAY | 0
+TEXTBOX | 6 | -410.0 | -348.0 | 224,224,240 | 两个同号点电荷——电场线相互排斥，存在鞍点 | 450.0 | 40.0 | 16
+CHARGE | 7 | -152.0 | 0.0 | 255,50,50 | 3e-06
+CHARGE | 8 | 142.5 | 0.0 | 255,50,50 | 3e-06
