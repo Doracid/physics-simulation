@@ -798,6 +798,9 @@ mode = 'select'
 dragging = False
 drag_start_mouse = None
 drag_start_pos = None
+panning = False
+pan_start_mouse = None
+pan_start_camera = None
 
 tool_rects = get_tool_rects()
 top_btn_rects = get_top_button_rects()
@@ -2226,6 +2229,7 @@ def handle_mousedown(btn, pos):
     global mode, elements, selected, dragging, drag_start_mouse, drag_start_pos
     global context_menu, faraday_active, record_trail, current_category, editing_element, measuring, global_panel_open
     global _resize_target, _resize_handle, _resize_start_mouse, _resize_start_vals, _scrub_target
+    global panning, pan_start_mouse, pan_start_camera
 
     # Confirm any pending text input on click
     _confirm_input()
@@ -2458,11 +2462,16 @@ def handle_mousedown(btn, pos):
             if selected:
                 selected.is_selected = False
                 selected = None
-            # Left-drag on empty canvas — no panning (camera locked to center)
-            pass
+            # Left-drag on empty canvas → pan camera
+            panning = True
+            pan_start_mouse = pos
+            pan_start_camera = (camera['x'], camera['y'])
 
-    elif btn == 2:  # Middle click — no panning (camera locked to center)
-        pass
+    elif btn == 2:  # Middle click — pan
+        if not global_panel_open:
+            panning = True
+            pan_start_mouse = pos
+            pan_start_camera = (camera['x'], camera['y'])
 
     elif btn == 3:  # Right click
         if mode == 'add_wire':
@@ -2504,6 +2513,7 @@ def handle_mousedown(btn, pos):
 def handle_mousemotion(pos, rel):
     global dragging, drag_start_mouse, measure_text, measuring
     global _resize_target, _resize_start_mouse, _scrub_target
+    global panning, pan_start_mouse, pan_start_camera
 
     # Drag scrub: click an input field then drag to adjust
     if _scrub_target and pygame.mouse.get_pressed()[0]:
@@ -2567,9 +2577,22 @@ def handle_mousemotion(pos, rel):
         field_system.mark_dirty()
         solve_and_update()
 
+    if panning and pan_start_mouse:
+        dx = pos[0] - pan_start_mouse[0]
+        dy = pos[1] - pan_start_mouse[1]
+        angle = camera.get('angle', 0.0)
+        if angle != 0:
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+            dx, dy = dx * cos_a + dy * sin_a, -dx * sin_a + dy * cos_a
+        camera['x'] = pan_start_camera[0] - dx / camera['zoom']
+        camera['y'] = pan_start_camera[1] - dy / camera['zoom']
+        return
+
 
 def handle_mouseup(btn, pos):
     global dragging, _resize_target, _resize_handle, _resize_start_mouse, _resize_start_vals, _scrub_target
+    global panning, pan_start_mouse, pan_start_camera
 
     if btn == 1:
         if _scrub_target:
@@ -2580,6 +2603,13 @@ def handle_mouseup(btn, pos):
         dragging = False
         drag_start_mouse = None
         drag_start_pos = None
+        panning = False
+        pan_start_mouse = None
+        pan_start_camera = None
+    elif btn == 2:
+        panning = False
+        pan_start_mouse = None
+        pan_start_camera = None
     elif btn == 3:
         if _resize_target:
             field_system.mark_dirty()
