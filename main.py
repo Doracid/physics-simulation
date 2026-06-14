@@ -897,7 +897,8 @@ study_mode = False
 study_projects = []
 study_project_index = 0
 study_project_name = ""
-_study_next_rect = None       # "下一个" button rect
+_study_next_rect = None       # "后一个" button rect
+_study_prev_rect = None       # "前一个" button rect
 _exit_to_home = False         # signal to return to home screen
 
 STUDY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'study')
@@ -1444,13 +1445,13 @@ def draw_top_bar(surface):
     draw_round_rect(surface, undo_bg, _undo_btn_rect, 9, border_color=BORDER)
     surface.blit(undo_size, undo_size.get_rect(center=_undo_btn_rect.center))
 
-    # ── Study mode: project name + "下一个" button ─────────────────
-    global _study_next_rect
+    # ── Study mode: project name + "前一个" / "后一个" buttons ──────
+    global _study_next_rect, _study_prev_rect
     if study_mode:
-        # "下一个" button – between undo and fps
-        next_font = get_font(18, bold=True)
-        next_lbl = "下一个 ▶"
-        next_size = next_font.render(next_lbl, True, TEXT_COLOR)
+        btn_font = get_font(18, bold=True)
+        # "后一个" button
+        next_lbl = "后一个 ▶"
+        next_size = btn_font.render(next_lbl, True, TEXT_COLOR)
         nw = next_size.get_width() + 20
         _study_next_rect = pygame.Rect(_undo_btn_rect.left - nw - 6, 5, nw, TOP_BAR_H - 10)
         next_hover = _study_next_rect.collidepoint(pygame.mouse.get_pos())
@@ -1459,9 +1460,20 @@ def draw_top_bar(surface):
         draw_round_rect(surface, next_bg, _study_next_rect, 9,
                         border_color=CYAN_DIM if next_hover else BORDER)
         surface.blit(next_size, next_size.get_rect(center=_study_next_rect.center))
-
+        # "前一个" button – to the left of "后一个"
+        prev_lbl = "◀ 前一个"
+        prev_size = btn_font.render(prev_lbl, True, TEXT_COLOR)
+        pw = prev_size.get_width() + 20
+        _study_prev_rect = pygame.Rect(_study_next_rect.left - pw - 6, 5, pw, TOP_BAR_H - 10)
+        prev_hover = _study_prev_rect.collidepoint(pygame.mouse.get_pos())
+        prev_bg = (24, 90, 120) if prev_hover else (20, 60, 80)
+        draw_glow(surface, _study_prev_rect, CYAN, intensity=50, spread=5, radius=9)
+        draw_round_rect(surface, prev_bg, _study_prev_rect, 9,
+                        border_color=CYAN_DIM if prev_hover else BORDER)
+        surface.blit(prev_size, prev_size.get_rect(center=_study_prev_rect.center))
     else:
         _study_next_rect = None
+        _study_prev_rect = None
 
 
 def draw_left_toolbar(surface):
@@ -2296,9 +2308,12 @@ def handle_mousedown(btn, pos):
 
     # === Top bar clicks ===
     if pos[1] < TOP_BAR_H:
-        # Study mode "下一个" button (renders above toolbar buttons)
+        # Study mode "后一个" / "前一个" buttons (renders above toolbar buttons)
         if study_mode and _study_next_rect and _study_next_rect.collidepoint(pos):
             handle_top_action('study_next')
+            return
+        if study_mode and _study_prev_rect and _study_prev_rect.collidepoint(pos):
+            handle_top_action('study_prev')
             return
         for i, btn_def in enumerate(top_buttons):
             if top_btn_rects[i].collidepoint(pos):
@@ -3116,15 +3131,18 @@ def handle_top_action(action):
     elif action == 'revert':
         _do_revert()
     elif action == 'exit':
-        _save_current_study()
         if study_mode:
             _exit_to_home = True
         else:
             _exit_to_home = True
         running = False
+    elif action == 'study_prev':
+        if study_mode:
+            prev_idx = study_project_index - 1
+            if prev_idx >= 0:
+                load_study_project(prev_idx)
     elif action == 'study_next':
         if study_mode:
-            _save_current_study()
             next_idx = study_project_index + 1
             if next_idx < len(study_projects):
                 load_study_project(next_idx)
@@ -4062,7 +4080,12 @@ def main():
             pygame.display.flip()
 
         _cleanup_temp_files()
-        if not _exit_to_home:
+        if _exit_to_home:
+            elements.clear()
+            selected = None
+            editing_element = None
+            field_system.mark_dirty()
+        else:
             break
 
     pygame.quit()

@@ -1,7 +1,0 @@
-# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
-# CATEGORY | electrostatic
-# CAMERA | 0.0 | 0.0 | 1.0
-# FARADAY | 0
-TEXTBOX | 12 | -344.6 | -283.3 | 224,224,240 | 电荷位于金属球壳内部¶外部电场分布与电荷在球壳内位置无关 | 500.0 | 100.0 | 16
-CHARGE | 13 | 0.0 | 0.0 | 255,50,50 | 1e-06
-METAL_SHELL | 14 | 0.0 | -1.0 | 200,202,204 | 90.0 | 10.0

@@ -1,7 +1,0 @@
-# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
-# CATEGORY | electrostatic
-# CAMERA | 0.0 | 0.0 | 1.0
-# FARADAY | 0
-CHARGE | 22 | -2.3 | 6.8 | 255,60,60 | 1e-06
-MOTION_CHARGE | 23 | -346.8 | 7.9 | 0,255,128 | -1e-06 | 0.001 | 0.0 | 500.0 | 0
-TEXTBOX | 24 | -14.0 | -269.0 | 224,224,240 | 按“播放”键启动演示 | 200.0 | 60.0 | 18

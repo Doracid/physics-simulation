@@ -1,8 +1,0 @@
-# ELECTRO_MAGNETIC_SIMULATION_SAVEFILE_V1
-# CATEGORY | electrostatic
-# CAMERA | 0.0 | 0.0 | 1.0
-# FARADAY | 0
-TEXTBOX | 15 | -389.0 | -350.0 | 224,224,240 | 点电荷与无限长金属板 | 480.0 | 40.0 | 16
-CHARGE | 16 | -208.0 | -5.0 | 255,50,50 | 3e-06
-METAL_PLATE | 17 | 238.0 | -235.0 | 200,202,204 | 10.0 | 90.0
-TEXTBOX | 18 | 425.0 | -2.0 | 224,224,240 | 无限长金属板 | 140.0 | 30.0 | 14
